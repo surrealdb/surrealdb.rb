@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.name = 'surrealdb-embedded'
   spec.version = SurrealDB::VERSION
   spec.authors = ['SurrealDB']
-  spec.email = ['info@surrealdb.com']
+  spec.email = ['stu.schwartz@surrealdb.com']
 
   spec.summary = 'Embedded SurrealDB engine for the Ruby SDK'
   spec.description = 'Adds embedded database support (mem://, surrealkv://, file://) to the ' \

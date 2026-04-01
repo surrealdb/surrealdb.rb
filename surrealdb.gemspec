@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.name = 'surrealdb'
   spec.version = SurrealDB::VERSION
   spec.authors = ['SurrealDB']
-  spec.email = ['info@surrealdb.com']
+  spec.email = ['stu.schwartz@surrealdb.com']
 
   spec.summary = 'Official SurrealDB SDK for Ruby'
   spec.description = 'Ruby client for SurrealDB with WebSocket and HTTP transports, ' \

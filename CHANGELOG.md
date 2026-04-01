@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-01
+
 ### Added
 
 - Initial SDK implementation with WebSocket and HTTP transports
