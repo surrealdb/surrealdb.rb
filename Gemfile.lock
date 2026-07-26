@@ -14,7 +14,7 @@ GEM
     bigdecimal (4.0.1)
     cbor (0.5.10.1)
     diff-lcs (1.6.2)
-    json (2.19.2)
+    json (2.19.9)
     language_server-protocol (3.17.0.5)
     lint_roller (1.1.0)
     parallel (1.27.0)
