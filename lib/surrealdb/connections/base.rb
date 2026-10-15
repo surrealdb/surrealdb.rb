@@ -89,10 +89,14 @@ module SurrealDB
 
       # Sends a request to one of the server's HTTP routes (/import, /export)
       # with a session's namespace, database and credentials, renewing its
-      # access token first as {#send_request} does.
+      # access token first as {#send_request} does. Like RPC requests, it is
+      # refused once the connection has been closed.
       # @param session [Uuid, nil]
       # @return [Net::HTTPResponse]
+      # @raise [NotConnectedError] if the connection is not open
       def http_request(verb, path, session: nil, **, &)
+        raise NotConnectedError, 'not connected' unless @connected
+
         renew_before(path, session)
         http_endpoint.request(verb, path, state: session_state(session), **, &)
       end
@@ -153,15 +157,14 @@ module SurrealDB
       # Renews a session's access token shortly before it expires, so the
       # session does not silently lose its credentials: with the refresh
       # token when there is one, otherwise by signing in again with the
-      # credentials it last signed in with.
-      # Renews the session's token if it is about to expire. Losing the
-      # connection while renewing means the request itself was never sent,
-      # so it is reported as NotConnectedError, which is safe to retry,
-      # rather than as an error from the request.
+      # credentials it last signed in with. Losing the connection while
+      # renewing means the request itself was never sent, so it is reported
+      # as NotConnectedError, which is safe to retry, rather than as an error
+      # from the request.
       def renew_before(request, session)
         return unless @renew_tokens
 
-        renew_tokens(session)
+        renew_tokens(request, session)
       rescue NotConnectedError
         raise
       rescue ConnectionError => e
@@ -169,7 +172,10 @@ module SurrealDB
                                  "'#{request}' was not sent"
       end
 
-      def renew_tokens(session)
+      # A token that can no longer be renewed is still used until it expires;
+      # after that the request is refused, as the server would run it
+      # signed out.
+      def renew_tokens(request, session)
         state = session_state(session)
         return unless state&.expiring?(@token_refresh_margin) && state.renewable?
 
@@ -177,14 +183,22 @@ module SurrealDB
           next unless state.expiring?(@token_refresh_margin) # another thread renewed it
 
           log(:debug, 'Access token expiring; renewing it')
-          if state.refresh_token
-            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
-          else
-            send_request(*state.signin, session: session)
-          end
+          renew_with(state, session)
         end
       rescue ServerError => e
         log(:warn, "Could not renew the access token: #{e.message}")
+        return unless state.expired?
+
+        raise AuthenticationError, "the access token has expired and could not be renewed (#{e.message}); " \
+                                   "'#{request}' was not sent"
+      end
+
+      def renew_with(state, session)
+        if state.refresh_token
+          send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
+        else
+          send_request(*state.signin, session: session)
+        end
       end
 
       def log(level, message)
