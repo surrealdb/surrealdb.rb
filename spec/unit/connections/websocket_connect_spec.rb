@@ -43,6 +43,27 @@ RSpec.describe SurrealDB::Connections::WebSocket do
     end
   end
 
+  context 'when the server keeps sending part of an answer to the upgrade' do
+    let(:server) { TCPServer.new('127.0.0.1', 0) }
+
+    it 'still gives up after connect_timeout' do
+      trickle = Thread.new do
+        socket = server.accept
+        socket.write("HTTP/1.1 101 Switching Protocols\r\n")
+        loop { socket.write("X-Padding: #{'x' * 1000}\r\n") } # always more to read
+      rescue IOError, SystemCallError
+        nil
+      end
+      connection = described_class.new("ws://127.0.0.1:#{server.addr[1]}", timeout: 30, connect_timeout: 0.3)
+      error, elapsed = connect_within(5, connection)
+      expect(error.message).to match(/handshake timed out/)
+      expect(elapsed).to be < 2
+    ensure
+      server.close
+      trickle&.kill
+    end
+  end
+
   context 'when nothing listens on the port' do
     it 'raises ConnectionError instead of a raw Errno' do
       port = TCPServer.open('127.0.0.1', 0) { |s| s.addr[1] }
