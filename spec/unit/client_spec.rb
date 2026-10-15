@@ -206,6 +206,16 @@ RSpec.describe SurrealDB::Client do
       allow(connection).to receive(:send_request).with('begin', []).and_return(txn_id)
     end
 
+    it 'is lost when its connection fails, and refuses further requests locally' do
+      allow(connection).to receive(:send_request).with('query', any_args)
+                                                 .and_raise(SurrealDB::ConnectionError, 'connection lost')
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::ConnectionError)
+      expect(tx).to be_lost
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
+      expect { tx.commit }.to raise_error(SurrealDB::TransactionError, /lost/)
+    end
+
     it 'begins a transaction and runs its requests with the txn id in the envelope' do
       tx = client.begin_transaction
       expect(tx.id).to eq(txn_id)
@@ -312,8 +322,8 @@ RSpec.describe SurrealDB::Connections::HTTP, '#close' do
 
   it 'detaches the sessions still attached, which the server would otherwise keep' do
     connection.close
-    expect(connection).to have_received(:execute).with('detach', [], session: first)
-    expect(connection).to have_received(:execute).with('detach', [], session: second)
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: first))
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: second))
     expect(connection).not_to be_connected
   end
 
