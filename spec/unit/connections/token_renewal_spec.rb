@@ -9,7 +9,7 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
   let(:fake_class) do
     Class.new(described_class) do
       attr_reader :calls
-      attr_accessor :next_expiry, :fail_on, :reject, :slow
+      attr_accessor :next_expiry, :fail_on, :reject, :slow, :time_out_on
 
       def timeouts
         @timeouts ||= {}
@@ -28,6 +28,7 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
         timeouts[method] = timeout
         sleep slow[method] if slow&.key?(method)
         raise SurrealDB::ConnectionError, 'connection closed' if method == fail_on
+        raise SurrealDB::TimeoutError, 'no answer' if method == time_out_on
         raise SurrealDB::NotAllowedError, 'invalid refresh token' if method == reject
 
         case method
@@ -122,7 +123,18 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     connection.next_expiry = Time.now + 3600
     connection.slow = { 'refresh' => 0.15 }
     expect { connection.send_request('query', ['RETURN 1'], timeout: 0.1) }
-      .to raise_error(SurrealDB::TimeoutError, /'query' timed out/)
+      .to raise_error(SurrealDB::TimeoutError, /'query' timed out/) { |e| expect(e).not_to be_sent }
+    expect(connection.calls).not_to include('query')
+  end
+
+  it 'reports a renewal that timed out as the request never having been sent' do
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.time_out_on = 'refresh'
+    expect { connection.send_request('query', ['RETURN 1'], timeout: 1) }
+      .to raise_error(SurrealDB::TimeoutError, /renewing the access token.*'query' was not sent/) { |e|
+        expect(e).not_to be_sent
+      }
     expect(connection.calls).not_to include('query')
   end
 

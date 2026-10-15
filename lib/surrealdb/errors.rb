@@ -13,7 +13,23 @@ module SurrealDB
   # may or may not have run. Raised instead of retrying requests that are
   # not safe to repeat (queries, writes, transactions).
   class RequestInterruptedError < ConnectionError; end
-  class TimeoutError < Error; end
+
+  # A request did not finish in time. {#sent?} says whether it may have
+  # reached the server: it is false when the time ran out before the request
+  # was sent (waiting for a reconnect, renewing the access token, opening a
+  # connection, writing the request).
+  class TimeoutError < Error
+    def initialize(message = nil, sent: true)
+      @sent = sent
+      super(message)
+    end
+
+    # @return [Boolean] whether the request may have reached the server
+    def sent?
+      @sent
+    end
+  end
+
   class ProtocolError < Error; end
 
   # Raised when a feature is unavailable on the current transport

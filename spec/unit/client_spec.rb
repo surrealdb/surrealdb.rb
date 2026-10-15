@@ -235,6 +235,16 @@ RSpec.describe SurrealDB::Client do
       expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
     end
 
+    it 'stays open when a request through it timed out before it was sent' do
+      not_sent = SurrealDB::TimeoutError.new('timed out renewing the access token', sent: false)
+      allow(connection).to receive(:send_request).with('query', any_args).and_raise(not_sent)
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::TimeoutError)
+      expect(tx).to be_open
+      tx.commit
+      expect(connection).to have_received(:send_request).with('commit', [txn_id], session: nil)
+    end
+
     it 'refuses requests after the transaction is finished' do
       tx = client.begin_transaction
       tx.commit

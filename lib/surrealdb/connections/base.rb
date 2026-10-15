@@ -179,6 +179,9 @@ module SurrealDB
       rescue ConnectionError => e
         raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
                                  "'#{request}' was not sent"
+      rescue TimeoutError => e
+        raise TimeoutError.new("timed out renewing the access token (#{e.message}); '#{request}' was not sent",
+                               sent: false)
       end
 
       # A token that cannot be renewed (there is nothing to renew it with, or
@@ -240,7 +243,7 @@ module SurrealDB
         return {} if deadline.nil?
 
         left = deadline - monotonic_now
-        raise TimeoutError, "'#{request}' timed out before it could be sent" unless left.positive?
+        raise TimeoutError.new("'#{request}' timed out before it could be sent", sent: false) unless left.positive?
 
         { timeout: left }
       end

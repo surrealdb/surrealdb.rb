@@ -390,7 +390,7 @@ module SurrealDB
         left = deadline - monotonic_now
         return if worker.join(left.clamp(0, nil))
 
-        raise TimeoutError, "'#{request}' timed out waiting for the connection to come back"
+        raise TimeoutError.new("'#{request}' timed out waiting for the connection to come back", sent: false)
       end
 
       # @raise [ConnectionError] if all attempts fail
