@@ -183,6 +183,9 @@ module SurrealDB
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
         drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+      rescue Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => e
+        drop_socket
+        raise ProtocolError, "HTTP got a malformed response: #{e.message}"
       end
 
       # Opening a socket sends nothing, so a failure here means the request

@@ -94,3 +94,14 @@ RSpec.describe SurrealDB::Client, '#connect version check' do
     end
   end
 end
+
+RSpec.describe SurrealDB::Client, '#server_version after a reconnect' do
+  it 'checks the server a reconnect reached, on the new connection' do
+    client = described_class.new('ws://localhost:8000')
+    check = client.connection.instance_variable_get(:@on_reconnect)
+    fresh = instance_double(SurrealDB::Connections::WebSocket, send_request: 'surrealdb-5.0.0')
+    expect { check.call(fresh) }.to raise_error(SurrealDB::UnsupportedVersionError)
+    expect(client.server_version).to eq('surrealdb-5.0.0')
+    expect(fresh).to have_received(:send_request).with('version')
+  end
+end

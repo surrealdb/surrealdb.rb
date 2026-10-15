@@ -181,13 +181,15 @@ module SurrealDB
                                  "'#{request}' was not sent"
       end
 
-      # A token that can no longer be renewed is still used until it expires;
-      # after that the request is refused, as the server would run it
-      # signed out. The renewal is a prerequisite of the request, so it counts
-      # against the request's deadline.
+      # A token that cannot be renewed (there is nothing to renew it with, or
+      # the server refused) is still used until it expires; after that the
+      # request is refused, as the server would run it signed out. The
+      # renewal is a prerequisite of the request, so it counts against the
+      # request's deadline.
       def renew_tokens(request, session, deadline = nil)
         state = session_state(session)
-        return unless state&.expiring?(@token_refresh_margin) && state.renewable?
+        return unless state&.expiring?(@token_refresh_margin)
+        return refuse_expired(request, state, 'no refresh token or sign-in to repeat') unless state.renewable?
 
         @renew_mutex.synchronize do
           next unless state.expiring?(@token_refresh_margin) # another thread renewed it
@@ -197,9 +199,13 @@ module SurrealDB
         end
       rescue ServerError => e
         log(:warn, "Could not renew the access token: #{e.message}")
+        refuse_expired(request, state, e.message)
+      end
+
+      def refuse_expired(request, state, reason)
         return unless state.expired?
 
-        raise AuthenticationError, "the access token has expired and could not be renewed (#{e.message}); " \
+        raise AuthenticationError, "the access token has expired and could not be renewed (#{reason}); " \
                                    "'#{request}' was not sent"
       end
 

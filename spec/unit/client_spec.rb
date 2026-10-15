@@ -345,6 +345,43 @@ RSpec.describe SurrealDB::Client, '#healthy?' do
     expect(client.healthy?).to be(false)
     expect { client.health }.to raise_error(SurrealDB::ConnectionError)
   end
+
+  it 'is false when something other than an HTTP server answers' do
+    server = TCPServer.new('127.0.0.1', 0)
+    answering = Thread.new do
+      loop do
+        socket = server.accept
+        socket.readpartial(4096)
+        socket.write("SSH-2.0-OpenSSH_9.6\r\n\r\n")
+        socket.close
+      end
+    rescue IOError, SystemCallError
+      nil
+    end
+    client = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 2)
+    expect(client.healthy?).to be(false)
+    expect { client.health }.to raise_error(SurrealDB::ProtocolError, /malformed/)
+    expect { client.connect }.to raise_error(SurrealDB::ProtocolError, /malformed/) # the version check
+  ensure
+    server&.close
+    answering&.kill
+  end
+end
+
+RSpec.describe SurrealDB::Client, '#use' do
+  let(:client) { described_class.new('http://localhost:8000') }
+
+  before { allow(client.connection).to receive(:send_request).and_return(nil) }
+
+  it 'clears the database with the namespace, which the server requires' do
+    client.use(namespace: nil)
+    expect(client.connection).to have_received(:send_request).with('use', [nil, nil])
+  end
+
+  it 'refuses a database without a namespace' do
+    expect { client.use(nil, 'prod') }.to raise_error(ArgumentError, /without a namespace/)
+    expect(client.connection).not_to have_received(:send_request)
+  end
 end
 
 RSpec.describe SurrealDB::Client, '#with_timeout' do
@@ -485,6 +522,13 @@ RSpec.describe SurrealDB::Client, '#import' do
   it 'raises when a successful import answers with something it cannot read' do
     allow(connection).to receive(:http_request).and_return(answer(200, 'not cbor'))
     expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /import's result/)
+  end
+
+  it 'raises when a successful import answers with something other than statement results' do
+    [nil, 'ok', { 'status' => 'OK' }, [1]].each do |result|
+      allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode(result)))
+      expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /not a list/)
+    end
   end
 
   it 'is fine with a successful import that reports no failures' do
