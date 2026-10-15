@@ -23,7 +23,7 @@ module SurrealDB
       attr_reader :access_expires_at
 
       # @return [String, nil] current refresh token
-      attr_accessor :refresh_token
+      attr_reader :refresh_token
 
       # @return [Hash{String => Object}]
       attr_reader :variables
@@ -67,6 +67,12 @@ module SurrealDB
       # @return [Boolean] whether the session holds credentials
       def authenticated?
         !@access_token.nil?
+      end
+
+      # Kept as a copy: the caller's string may change later.
+      # @param token [String, nil]
+      def refresh_token=(token)
+        @refresh_token = snapshot(token)
       end
 
       # @param token [String, nil]

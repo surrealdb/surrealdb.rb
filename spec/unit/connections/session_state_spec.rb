@@ -165,6 +165,14 @@ RSpec.describe SurrealDB::Connections::SessionState do
     expect(state.copy.variables['v'][0].id).to eq(['a', { 'k' => 'v' }])
   end
 
+  it 'keeps a refresh token it is given as it was, not the caller string' do
+    token = +'refresh-1'
+    state = described_class.new
+    state.refresh_token = token
+    token << 'changed'
+    expect(state.refresh_token).to eq('refresh-1')
+  end
+
   it 'keeps the tokens and the namespace and database as they were, not the caller strings' do
     token = +'token'
     namespace = +'app'
