@@ -118,7 +118,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     it 'signs them in again with the credentials they signed in with, not their token, which may have expired' do
       dropped = false
       allow(inner).to receive_messages(connect: nil, close: nil)
-      allow(inner).to receive(:execute) do |method, params, session: nil|
+      allow(inner).to receive(:execute) do |method, params, session: nil, **|
         sent << [method, params, session]
         if method == 'select' && !dropped
           dropped = true

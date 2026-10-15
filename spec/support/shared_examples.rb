@@ -397,6 +397,13 @@ RSpec.shared_examples 'import and export' do
     expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
   end
 
+  it 'refuses import and export from a closed session, rather than sending them signed out' do
+    session = client.new_session
+    session.close
+    expect { session.export }.to raise_error(SurrealDB::SessionError, /closed/)
+    expect { session.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::SessionError, /closed/)
+  end
+
   it 'round-trips an export through an import' do
     client.create(rid('rt'), { 'name' => 'Round', 'tags' => %w[a b] })
     sql = client.export(tables: [table])
