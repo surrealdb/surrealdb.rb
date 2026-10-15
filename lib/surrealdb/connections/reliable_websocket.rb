@@ -166,11 +166,22 @@ module SurrealDB
         @inner.attached_sessions.to_a.each do |id, state|
           state = state.copy
           @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
-          @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id) if state.access_token
+          replay_auth(id, state)
           if state.namespace || state.database
             @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id)
           end
           state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
+        end
+      end
+
+      # Signs in again as the default session does, so a token that expired
+      # while we were away does not matter; a session given a token from
+      # elsewhere presents it again.
+      def replay_auth(id, state)
+        if state.signin
+          @inner.send_request(*state.signin, session: id)
+        elsif state.access_token
+          @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
         end
       end
 

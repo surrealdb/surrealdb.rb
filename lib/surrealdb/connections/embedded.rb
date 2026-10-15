@@ -61,12 +61,12 @@ module SurrealDB
       # @param live_query_id [String]
       # @param handler [Proc, Queue]
       def on_notification(live_query_id, handler)
-        @mutex.synchronize { @live_handlers[live_query_id] = handler }
+        @mutex.synchronize { @live_handlers[live_query_id.to_s] = handler }
       end
 
       # @param live_query_id [String]
       def remove_notification_handler(live_query_id)
-        @mutex.synchronize { @live_handlers.delete(live_query_id) }
+        @mutex.synchronize { @live_handlers.delete(live_query_id.to_s) }
       end
 
       protected
@@ -158,7 +158,7 @@ module SurrealDB
         raw = ::CBOR.decode(bytes)
         resolved = CBOR::Decoder.resolve(raw)
         result = resolved.is_a?(Hash) ? (resolved['result'] || resolved) : resolved
-        live_id = result['id'] if result.is_a?(Hash)
+        live_id = result['id']&.to_s if result.is_a?(Hash) # a Uuid; handlers are kept by its string
         return unless live_id
 
         handler = @mutex.synchronize { @live_handlers[live_id] }
