@@ -28,6 +28,23 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
     expect(http).to have_received(:use_ssl=).with(true)
   end
 
+  it 'raises an error the body IO raised as it was, not as a network failure' do
+    server = TCPServer.new('127.0.0.1', 0)
+    reader = Thread.new do
+      socket = server.accept
+      loop { socket.readpartial(4096) }
+    rescue IOError, SystemCallError
+      nil
+    end
+    body = Object.new
+    def body.read(*) = raise(Errno::EIO, 'disk')
+    endpoint = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 2)
+    expect { endpoint.request(:post, '/import', body: body) }.to raise_error(Errno::EIO, /disk/)
+  ensure
+    server&.close
+    reader&.kill
+  end
+
   describe '.raise_for' do
     def response(code, body)
       klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)

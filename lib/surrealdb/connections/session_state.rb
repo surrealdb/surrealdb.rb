@@ -125,11 +125,11 @@ module SurrealDB
       # and NONE leaves it alone.
       def track_use(params, result)
         if result.is_a?(Hash) && (result.key?('namespace') || result.key?('database'))
-          @namespace = present(result['namespace'])
-          @database = present(result['database'])
+          @namespace = snapshot(present(result['namespace']))
+          @database = snapshot(present(result['database']))
         else
-          @namespace = use_value(params[0], @namespace)
-          @database = use_value(params[1], @database)
+          @namespace = snapshot(use_value(params[0], @namespace))
+          @database = snapshot(use_value(params[1], @database))
         end
       end
 
@@ -154,18 +154,18 @@ module SurrealDB
       def select_scope(source)
         namespace = source['NS'] || source['ns']
         database = source['DB'] || source['db']
-        @namespace = namespace if namespace.is_a?(String)
-        @database = database if database.is_a?(String)
+        @namespace = snapshot(namespace) if namespace.is_a?(String)
+        @database = snapshot(database) if database.is_a?(String)
       end
 
       def store_tokens(result)
         case result
         when String
-          @access_token = result
+          @access_token = snapshot(result)
           @refresh_token = nil
         when Hash
-          @access_token = result['access'] || result['token']
-          @refresh_token = result['refresh']
+          @access_token = snapshot(result['access'] || result['token'])
+          @refresh_token = snapshot(result['refresh'])
         end
       end
 
