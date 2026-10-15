@@ -81,6 +81,12 @@ RSpec.describe SurrealDB::RecordID do
       expect(described_class.parse("t:\u27E8\\u{41}\\t\u27E9").id).to eq("A\t")
     end
 
+    it 'rejects a unicode escape that does not name a character' do
+      ['\\u{zz}', '\\u{}', '\\u{D800}', '\\u{110000}', '\\u{0000041}'].each do |escape|
+        expect { described_class.parse("t:\u27E8#{escape}\u27E9") }.to raise_error(ArgumentError, /unicode escape/)
+      end
+    end
+
     it 'rejects unterminated or trailing escaped ids' do
       expect { described_class.parse("t:\u27E8abc") }.to raise_error(ArgumentError)
       expect { described_class.parse("t:\u27E8a\u27E9b") }.to raise_error(ArgumentError)
