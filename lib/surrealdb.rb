@@ -3,6 +3,7 @@
 require_relative 'surrealdb/version'
 require_relative 'surrealdb/errors'
 require_relative 'surrealdb/configuration'
+require_relative 'surrealdb/server_version'
 require_relative 'surrealdb/models/none'
 require_relative 'surrealdb/models/table'
 require_relative 'surrealdb/models/uuid'

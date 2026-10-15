@@ -21,6 +21,9 @@ module SurrealDB
     # @return [Connections::Base]
     attr_reader :connection
 
+    # @return [String, nil] the server's version, as it reported it on connect
+    attr_reader :server_version
+
     # @param url [String] connection URL (ws://, wss://, http://, https://)
     # @param options [Hash] connection options
     # @option options [Numeric] :timeout response timeout in seconds
@@ -28,16 +31,24 @@ module SurrealDB
     # @option options [Boolean] :reconnect reconnect WebSocket connections automatically (default true)
     # @option options [Integer] :reconnect_max_retries reconnection attempts before giving up (default 5)
     # @option options [Numeric] :reconnect_delay base backoff delay in seconds (default 1.0)
+    # @option options [Boolean] :version_check refuse servers outside {ServerVersion} (default true)
+    # @option options [Boolean] :renew_tokens renew access tokens before they expire (default true)
+    # @option options [Numeric] :token_refresh_margin seconds before expiry to renew (default 60)
     def initialize(url, **options)
       @url = url
       @options = options
+      @version_check = options.fetch(:version_check, true)
+      @server_version = nil
       @connection = build_connection(url, **options)
     end
 
-    # Opens the connection to SurrealDB.
+    # Opens the connection to SurrealDB and checks the server's version.
     # @return [self]
+    # @raise [UnsupportedVersionError] when the server's version is not supported
+    #   (the connection is closed again)
     def connect
       @connection.connect
+      check_server_version
       self
     end
 
@@ -157,6 +168,14 @@ module SurrealDB
 
     # Requests made directly on the client run in the connection's default
     # session.
+    def check_server_version
+      @server_version = @connection.send_request(Protocol::Methods::VERSION).to_s
+      ServerVersion.check!(@server_version) if @version_check
+    rescue UnsupportedVersionError
+      @connection.close
+      raise
+    end
+
     def rpc(method, params = [])
       @connection.send_request(method, params)
     end
