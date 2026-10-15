@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+  schedule:
+    # Daily, so a nightly server regression shows up without waiting for a PR.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -37,7 +40,9 @@ jobs:
       fail-fast: false
       matrix:
         ruby: ["3.3"]
-        surrealdb: ["v3.0.4"]
+        # v3.0.4 is the oldest supported server; v3 is the latest 3.x release;
+        # nightly is the 4.0 development line.
+        surrealdb: ["v3.0.4", "v3", "nightly"]
         transport: [websocket, http]
     env:
       SURREALDB_WS_URL: ws://localhost:8000
@@ -53,6 +58,7 @@ jobs:
 
       - name: Start SurrealDB
         run: |
+          docker pull surrealdb/surrealdb:${{ matrix.surrealdb }}
           docker run -d --name surrealdb -p 8000:8000 \
             surrealdb/surrealdb:${{ matrix.surrealdb }} \
             start --user root --pass root --allow-all
@@ -69,6 +75,9 @@ jobs:
           echo "SurrealDB failed to start"
           docker logs surrealdb
           exit 1
+
+      - name: Server version
+        run: docker exec surrealdb /surreal version || docker run --rm surrealdb/surrealdb:${{ matrix.surrealdb }} version
 
       - name: Run integration tests (${{ matrix.transport }})
         run: bundle exec rspec spec/integration/${{ matrix.transport }}
