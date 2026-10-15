@@ -105,14 +105,19 @@ module SurrealDB
     # --- CRUD ---
 
     # Selects all records from a table, or a single record by ID.
-    # @param resource [String, RecordID, Table] table name, "table:id", or RecordID
+    #
+    # A String is always a table name. To target one record, pass a
+    # {RecordID} (or {StringRecordID}); a String containing ":" raises
+    # ArgumentError rather than being guessed at.
+    #
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @return [Array, Hash] records
     def select(resource)
       @connection.send_request(Protocol::Methods::SELECT, [resource_param(resource)])
     end
 
     # Creates a new record.
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @param data [Hash, nil] record content
     # @return [Hash] created record
     def create(resource, data = nil)
@@ -138,7 +143,7 @@ module SurrealDB
     end
 
     # Replaces a record or all records in a table.
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @param data [Hash] replacement content
     # @return [Object] updated record(s)
     def update(resource, data)
@@ -146,7 +151,7 @@ module SurrealDB
     end
 
     # Upserts a record (insert or update).
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @param data [Hash] record content
     # @return [Object] upserted record(s)
     def upsert(resource, data)
@@ -154,7 +159,7 @@ module SurrealDB
     end
 
     # Deep-merges data into a record.
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @param data [Hash] data to merge
     # @return [Object] merged record(s)
     def merge(resource, data)
@@ -162,7 +167,7 @@ module SurrealDB
     end
 
     # Applies JSON Patch operations to a record.
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @param patches [Array<Hash>] patch operations
     # @return [Object] patched record(s)
     def patch(resource, patches)
@@ -170,20 +175,20 @@ module SurrealDB
     end
 
     # Deletes a record or all records from a table.
-    # @param resource [String, RecordID, Table]
+    # @param resource [String, Table, RecordID, StringRecordID] table name or record id
     # @return [Object] deleted record(s)
     def delete(resource)
       @connection.send_request(Protocol::Methods::DELETE, [resource_param(resource)])
     end
 
     # Creates a graph relation between two records.
-    # @param from [String, RecordID] source record
-    # @param relation [String] relation table
-    # @param to [String, RecordID] target record
+    # @param from [RecordID, StringRecordID, Array<RecordID>] source record(s)
+    # @param relation [String, Table] relation table
+    # @param to [RecordID, StringRecordID, Array<RecordID>] target record(s)
     # @param data [Hash, nil] relation content
     # @return [Object] created relation
     def relate(from, relation, to, data = nil)
-      params = [resource_param(from), relation, resource_param(to)]
+      params = [record_param(from), table_param(relation), record_param(to)]
       params << data unless data.nil?
       @connection.send_request(Protocol::Methods::RELATE, params)
     end
@@ -349,17 +354,37 @@ module SurrealDB
       end
     end
 
+    # Table or record target for CRUD methods. Typed values are passed through
+    # so the encoder sends them as CBOR tags 7 and 8. Strings are table names.
     def resource_param(resource)
       case resource
-      when Table then resource.name
-      else resource.to_s
+      when Table, RecordID, StringRecordID then resource
+      else table_param(resource)
       end
     end
 
     def table_param(resource)
-      case resource
-      when Table then resource.name
-      else resource.to_s
+      return resource if resource.is_a?(Table)
+
+      name = resource.to_s
+      if name.include?(':')
+        raise ArgumentError,
+              "#{name.inspect} is not a table name. Strings are never parsed as record ids; " \
+              "pass SurrealDB::RecordID.new(table, id), SurrealDB::RecordID.parse(#{name.inspect}) " \
+              "or SurrealDB::StringRecordID.new(#{name.inspect})"
+      end
+
+      Table.new(name)
+    end
+
+    def record_param(record)
+      case record
+      when RecordID, StringRecordID then record
+      when Array then record.map { |r| record_param(r) }
+      else
+        raise ArgumentError,
+              "expected a SurrealDB::RecordID, got #{record.inspect}. Strings are never parsed as record ids; " \
+              'use SurrealDB::RecordID.parse or SurrealDB::StringRecordID'
       end
     end
 

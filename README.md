@@ -36,11 +36,15 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   # Query
   results = db.query("SELECT * FROM person WHERE age > $min", { "min" => 25 })
 
+  # Record ids are typed values; a plain string is always a table name
+  alice = SurrealDB::RecordID.new("person", "alice")
+  db.create(alice, { "name" => "Alice", "age" => 31 })
+
   # Update
-  db.merge("person:alice", { "email" => "alice@example.com" })
+  db.merge(alice, { "email" => "alice@example.com" })
 
   # Delete
-  db.delete("person:alice")
+  db.delete(alice)
 end
 ```
 
@@ -107,13 +111,14 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   person = db.create("person", { "name" => "Alice", "age" => 30 })
 
   # Create with specific ID
-  db.create("person:bob", { "name" => "Bob", "age" => 25 })
+  bob = SurrealDB::RecordID.new("person", "bob")
+  db.create(bob, { "name" => "Bob", "age" => 25 })
 
   # Select all records from a table
   people = db.select("person")
 
   # Select a specific record
-  alice = db.select("person:alice")
+  alice = db.select(SurrealDB::RecordID.new("person", "alice"))
 
   # Insert multiple records
   db.insert("person", [
@@ -122,28 +127,40 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   ])
 
   # Update (full replace)
-  db.update("person:bob", { "name" => "Bob", "age" => 26, "email" => "bob@example.com" })
+  db.update(bob, { "name" => "Bob", "age" => 26, "email" => "bob@example.com" })
 
   # Upsert (insert or update)
-  db.upsert("person:eve", { "name" => "Eve", "age" => 22 })
+  db.upsert(SurrealDB::RecordID.new("person", "eve"), { "name" => "Eve", "age" => 22 })
 
   # Merge (partial update)
-  db.merge("person:bob", { "email" => "bob@newmail.com" })
+  db.merge(bob, { "email" => "bob@newmail.com" })
 
   # Patch (JSON Patch)
-  db.patch("person:bob", [
+  db.patch(bob, [
     { "op" => "replace", "path" => "/age", "value" => 27 }
   ])
 
   # Delete a record
-  db.delete("person:bob")
+  db.delete(bob)
 
   # Delete all records from a table
   db.delete("person")
 
   # Create a relation
-  db.relate("person:alice", "knows", "person:bob", { "since" => 2024 })
+  db.relate(SurrealDB::RecordID.new("person", "alice"), "knows", bob, { "since" => 2024 })
 end
+```
+
+### Record ids and strings
+
+A plain string is always a table name. Strings are never parsed as record ids
+implicitly, so `db.select("person:alice")` raises `ArgumentError` instead of
+silently targeting a table called `person:alice`. Say what you mean instead:
+
+```ruby
+SurrealDB::RecordID.new("person", "alice")           # build it
+SurrealDB::RecordID.parse("person:alice")            # parse it on the client
+SurrealDB::StringRecordID.new("temp:['London', 1]")  # let the server parse it
 ```
 
 ## Queries

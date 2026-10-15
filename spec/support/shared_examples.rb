@@ -10,93 +10,121 @@ RSpec.shared_examples 'CRUD operations' do
 
   after { client.close }
 
+  def rid(key)
+    SurrealDB::RecordID.new(table, key)
+  end
+
   def unwrap(result)
     result.is_a?(Array) && result.length == 1 ? result[0] : result
   end
 
   it 'creates and selects a record' do
     created = unwrap(client.create(table, { 'name' => 'Alice', 'age' => 30 }))
-    expect(created).to be_a(Hash)
+    expect(created['id']).to be_a(SurrealDB::RecordID)
+    expect(created['id'].table).to eq(table)
     expect(created['name']).to eq('Alice')
 
     records = client.select(table)
-    expect(records).to be_a(Array)
-    expect(records.length).to eq(1)
-    expect(records[0]['name']).to eq('Alice')
+    expect(records.map { |r| r['id'] }).to eq([created['id']])
   end
 
-  it 'creates a record with a specific id' do
-    record_id = "#{table}:alice"
-    created = unwrap(client.create(record_id, { 'name' => 'Alice' }))
-    expect(created).to be_a(Hash)
+  it 'creates a record with a specific id in the right table' do
+    created = unwrap(client.create(rid('alice'), { 'name' => 'Alice' }))
+    expect(created['id']).to eq(rid('alice'))
     expect(created['name']).to eq('Alice')
+
+    # Regression: record ids used to be sent as strings, so this created a
+    # table literally named "<table>:alice".
+    tables = db_tables(client)
+    expect(tables).to include(table)
+    expect(tables).not_to include("#{table}:alice")
+  end
+
+  it 'selects a single record by id' do
+    client.create(rid('alice'), { 'name' => 'Alice' })
+    client.create(rid('bob'), { 'name' => 'Bob' })
+    selected = unwrap(client.select(rid('alice')))
+    expect(selected).to eq({ 'id' => rid('alice'), 'name' => 'Alice' })
+  end
+
+  it 'lets the server parse a StringRecordID' do
+    client.create(rid('alice'), { 'name' => 'Alice' })
+    selected = unwrap(client.select(SurrealDB::StringRecordID.new("#{table}:alice")))
+    expect(selected['id']).to eq(rid('alice'))
+  end
+
+  it 'round-trips integer and array record keys' do
+    created = unwrap(client.create(rid(42), { 'n' => 1 }))
+    expect(created['id']).to eq(rid(42))
+    created = unwrap(client.create(rid(['London', 7]), { 'n' => 2 }))
+    expect(created['id']).to eq(rid(['London', 7]))
+    expect(unwrap(client.select(rid(['London', 7])))['n']).to eq(2)
+  end
+
+  it 'refuses a "table:id" string instead of guessing' do
+    expect { client.select("#{table}:alice") }.to raise_error(ArgumentError, /RecordID/)
   end
 
   it 'inserts multiple records' do
-    data = [
-      { 'name' => 'Alice' },
-      { 'name' => 'Bob' }
-    ]
-    inserted = client.insert(table, data)
-    expect(inserted).to be_a(Array)
-    expect(inserted.length).to eq(2)
+    inserted = client.insert(table, [{ 'name' => 'Alice' }, { 'name' => 'Bob' }])
+    expect(inserted.map { |r| r['name'] }).to contain_exactly('Alice', 'Bob')
+    expect(inserted.map { |r| r['id'].table }.uniq).to eq([table])
+    expect(client.select(table).length).to eq(2)
   end
 
   it 'updates a record' do
-    client.create("#{table}:one", { 'name' => 'Alice', 'age' => 30 })
-    updated = unwrap(client.update("#{table}:one", { 'name' => 'Alice', 'age' => 31 }))
-    expect(updated).to be_a(Hash)
-    expect(updated['age']).to eq(31)
+    client.create(rid('one'), { 'name' => 'Alice', 'age' => 30 })
+    updated = unwrap(client.update(rid('one'), { 'name' => 'Alice', 'age' => 31 }))
+    expect(updated).to eq({ 'id' => rid('one'), 'name' => 'Alice', 'age' => 31 })
+    expect(unwrap(client.select(rid('one')))['age']).to eq(31)
   end
 
   it 'upserts a record' do
-    upserted = unwrap(client.upsert("#{table}:up1", { 'name' => 'Charlie', 'score' => 100 }))
-    expect(upserted).to be_a(Hash)
-    expect(upserted['name']).to eq('Charlie')
+    upserted = unwrap(client.upsert(rid('up1'), { 'name' => 'Charlie', 'score' => 100 }))
+    expect(upserted).to eq({ 'id' => rid('up1'), 'name' => 'Charlie', 'score' => 100 })
+    upserted = unwrap(client.upsert(rid('up1'), { 'name' => 'Charlie', 'score' => 101 }))
+    expect(upserted['score']).to eq(101)
+    expect(client.select(table).length).to eq(1)
   end
 
   it 'merges data into a record' do
-    client.create("#{table}:m1", { 'name' => 'Alice', 'age' => 30 })
-    merged = unwrap(client.merge("#{table}:m1", { 'email' => 'alice@test.com' }))
-    expect(merged).to be_a(Hash)
-    expect(merged['name']).to eq('Alice')
-    expect(merged['email']).to eq('alice@test.com')
+    client.create(rid('m1'), { 'name' => 'Alice', 'age' => 30 })
+    merged = unwrap(client.merge(rid('m1'), { 'email' => 'alice@test.com' }))
+    expect(merged).to eq({ 'id' => rid('m1'), 'name' => 'Alice', 'age' => 30, 'email' => 'alice@test.com' })
   end
 
   it 'patches a record' do
-    client.create("#{table}:p1", { 'name' => 'Alice', 'age' => 30 })
-    patched = unwrap(client.patch("#{table}:p1", [
-                                    { 'op' => 'replace', 'path' => '/age', 'value' => 31 }
-                                  ]))
-    expect(patched).to be_a(Hash)
+    client.create(rid('p1'), { 'name' => 'Alice', 'age' => 30 })
+    client.patch(rid('p1'), [{ 'op' => 'replace', 'path' => '/age', 'value' => 31 }])
+    expect(unwrap(client.select(rid('p1')))['age']).to eq(31)
   end
 
   it 'deletes a record' do
-    client.create("#{table}:d1", { 'name' => 'Alice' })
-    deleted = unwrap(client.delete("#{table}:d1"))
-    expect(deleted).to be_a(Hash)
-
-    # SurrealDB 3.0 raises NotFoundError on select from empty/nonexistent tables
-    remaining = begin
-      client.select(table)
-    rescue SurrealDB::NotFoundError
-      []
-    end
-    expect(remaining).to be_empty
+    client.create(rid('d1'), { 'name' => 'Alice' })
+    client.create(rid('d2'), { 'name' => 'Bob' })
+    deleted = unwrap(client.delete(rid('d1')))
+    expect(deleted).to eq({ 'id' => rid('d1'), 'name' => 'Alice' })
+    expect(client.select(table).map { |r| r['id'] }).to eq([rid('d2')])
   end
 
   it 'deletes all records from a table' do
-    client.query("DEFINE TABLE #{table} SCHEMALESS")
-    client.create("#{table}:d2", { 'name' => 'Alice' })
-    client.create("#{table}:d3", { 'name' => 'Bob' })
+    client.create(rid('d2'), { 'name' => 'Alice' })
+    client.create(rid('d3'), { 'name' => 'Bob' })
     client.delete(table)
+    expect(client.select(table)).to eq([])
+  end
 
-    remaining = begin
-      client.select(table)
-    rescue SurrealDB::NotFoundError
-      []
-    end
-    expect(remaining).to be_empty
+  it 'relates two records' do
+    alice = rid('alice')
+    bob = rid('bob')
+    client.create(alice, {})
+    client.create(bob, {})
+    edge_table = unique_table('knows')
+    edge = unwrap(client.relate(alice, edge_table, bob, { 'since' => 2020 }))
+    expect(edge['in']).to eq(alice)
+    expect(edge['out']).to eq(bob)
+    expect(edge['id'].table).to eq(edge_table)
+    expect(edge['since']).to eq(2020)
   end
 end
 

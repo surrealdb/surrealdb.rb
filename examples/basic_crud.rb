@@ -11,24 +11,26 @@ SurrealDB.connect('ws://localhost:8000') do |db|
   alice = db.create('person', { 'name' => 'Alice', 'age' => 30 })
   puts "Created: #{alice}"
 
-  db.create('person:bob', { 'name' => 'Bob', 'age' => 25 })
+  # Record ids are typed values; a plain string is always a table name
+  bob = SurrealDB::RecordID.new('person', 'bob')
+  db.create(bob, { 'name' => 'Bob', 'age' => 25 })
 
   # Select all
   people = db.select('person')
   puts "All people: #{people}"
 
   # Update
-  db.update('person:bob', { 'name' => 'Bob', 'age' => 26 })
+  db.update(bob, { 'name' => 'Bob', 'age' => 26 })
 
   # Merge
-  db.merge('person:bob', { 'email' => 'bob@example.com' })
+  db.merge(bob, { 'email' => 'bob@example.com' })
 
   # Query
   results = db.query('SELECT * FROM person WHERE age >= $min', { 'min' => 26 })
   puts "Query results: #{results}"
 
   # Delete
-  db.delete('person:bob')
+  db.delete(bob)
   puts "Remaining: #{db.select('person')}"
 
   # Cleanup

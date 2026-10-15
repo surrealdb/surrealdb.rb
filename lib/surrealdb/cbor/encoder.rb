@@ -27,6 +27,8 @@ module SurrealDB
           ::CBOR::Tagged.new(Tags::TABLE, obj.name)
         when SurrealDB::RecordID
           ::CBOR::Tagged.new(Tags::RECORD_ID, [obj.table, prepare(obj.id)])
+        when SurrealDB::StringRecordID
+          ::CBOR::Tagged.new(Tags::RECORD_ID, obj.value)
         when SurrealDB::Duration
           ::CBOR::Tagged.new(Tags::DURATION_COMPACT, [obj.secs, obj.nanos])
         when SurrealDB::Range

@@ -40,6 +40,25 @@ RSpec.describe SurrealDB::RecordID do
       expect(rid.id).to eq('some-complex-id')
     end
 
+    it 'parses backtick and angle-bracket escaped tables' do
+      expect(described_class.parse('`my-table`:x')).to eq(described_class.new('my-table', 'x'))
+      expect(described_class.parse("\u27E8my table\u27E9:x")).to eq(described_class.new('my table', 'x'))
+    end
+
+    it 'keeps ids with letters after digits as strings' do
+      expect(described_class.parse('knows:2wl3iofcyqmg6in96bga').id).to eq('2wl3iofcyqmg6in96bga')
+    end
+
+    it 'refuses complex ids it cannot parse on the client' do
+      expect { described_class.parse("temp:['London', 1]") }.to raise_error(ArgumentError, /StringRecordID/)
+    end
+
+    it 'round-trips through #to_s' do
+      ['person:alice', "person:\u27E8a-b\u27E9", 'post:42', "\u27E8a:b\u27E9:c", "x:\u27E8123\u27E9"].each do |str|
+        expect(described_class.parse(str).to_s).to eq(str)
+      end
+    end
+
     it 'rejects strings without colon' do
       expect { described_class.parse('invalid') }.to raise_error(ArgumentError)
     end
@@ -65,7 +84,15 @@ RSpec.describe SurrealDB::RecordID do
 
     it 'formats array ids' do
       rid = described_class.new('test', [1, 'two'])
-      expect(rid.to_s).to eq('test:[1, two]')
+      expect(rid.to_s).to eq('test:[1, "two"]')
+    end
+
+    it 'escapes table names that are not identifiers' do
+      expect(described_class.new('person:alice', 'x').to_s).to eq("\u27E8person:alice\u27E9:x")
+    end
+
+    it 'escapes string ids made only of digits so they do not read as numbers' do
+      expect(described_class.new('post', '42').to_s).to eq("post:\u27E842\u27E9")
     end
   end
 
@@ -82,5 +109,17 @@ RSpec.describe SurrealDB::RecordID do
       b = described_class.new('user', 'jane')
       expect(a).not_to eq(b)
     end
+  end
+end
+
+RSpec.describe SurrealDB::StringRecordID do
+  it 'is encoded as CBOR tag 8 carrying the string' do
+    tagged = SurrealDB::CBOR::Encoder.prepare(described_class.new('person:alice'))
+    expect(tagged.tag).to eq(SurrealDB::CBOR::Tags::RECORD_ID)
+    expect(tagged.value).to eq('person:alice')
+  end
+
+  it 'rejects empty strings' do
+    expect { described_class.new('') }.to raise_error(ArgumentError)
   end
 end
