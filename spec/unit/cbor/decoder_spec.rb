@@ -25,6 +25,10 @@ RSpec.describe SurrealDB::CBOR::Decoder do
       expect(result.id).to eq('john')
     end
 
+    it 'handles StringRecordID, the string form of the record id tag' do
+      expect(round_trip(SurrealDB::StringRecordID.new('person:alice'))).to eq(SurrealDB::StringRecordID.new('person:alice'))
+    end
+
     it 'handles RecordID with integer id' do
       rid = SurrealDB::RecordID.new('post', 42)
       result = round_trip(rid)
