@@ -132,19 +132,20 @@ module SurrealDB
       end
 
       def transport(request, repeatable:, retried: false)
-        start_http unless @http.started?
+        open_socket
         reused = @requests_on_socket.positive?
         response = @http.request(request)
         @requests_on_socket += 1
         response
       rescue *STALE_CONNECTION_ERRORS => e
         drop_socket
-        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
+        # The request was written, on a fresh socket as much as on a reused one.
         unless repeatable
           raise RequestInterruptedError,
-                "HTTP keep-alive socket failed while the request was in flight (#{e.class}); " \
+                "HTTP connection failed while the request was in flight (#{e.class}); " \
                 'it was not sent again because it may already have run'
         end
+        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
 
         log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
         transport(request, repeatable: true, retried: true)
@@ -154,6 +155,18 @@ module SurrealDB
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
         drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+      end
+
+      # Opening a socket sends nothing, so a failure here means the request
+      # was never sent.
+      def open_socket
+        return if @http.started?
+
+        start_http
+      rescue Net::OpenTimeout => e
+        raise TimeoutError, "HTTP connect timed out: #{e.message}"
+      rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
+        raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
       end
 
       def start_http

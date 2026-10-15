@@ -55,7 +55,8 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
     Timeout.timeout(5) do
-      expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::ConnectionError)
+      # The server read the whole request before dropping it: it may have run.
+      expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::RequestInterruptedError)
       expect(server.requests).to eq(1)
       expect(http).to be_connected
       expect(http.send_request('ping')).to eq('pong')
@@ -63,6 +64,12 @@ RSpec.describe SurrealDB::Connections::HTTP do
   ensure
     http&.close
     server&.close
+  end
+end
+
+RSpec.describe SurrealDB::Protocol::Methods do
+  it 'does not count detach as safe to repeat, as a second one finds no session' do
+    expect(described_class::SAFE_TO_REPEAT).not_to include('detach')
   end
 end
 
