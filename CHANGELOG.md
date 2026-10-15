@@ -32,6 +32,12 @@
   `connect_timeout` (defaults to `timeout`), and connection failures raise `ConnectionError`
   instead of raw `Errno` exceptions.
 
+- HTTP requests failed with `EOFError`/`EPIPE` when the kept-alive socket had been closed by
+  the server. The request is now sent once more on a fresh socket when a reused socket dies
+  before any response arrives. One failed request no longer marks the HTTP client as
+  permanently disconnected, and an HTTP 401 is reported as `NotAllowedError` with the
+  server's message instead of a bare `ConnectionError`.
+
 ### Added
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)
