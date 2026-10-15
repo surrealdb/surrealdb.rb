@@ -227,6 +227,14 @@ RSpec.describe SurrealDB::Client do
       expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
     end
 
+    it 'is lost when the connection drops under a stream inside it' do
+      allow(connection).to receive(:supports_streaming?).and_return(true)
+      allow(connection).to receive(:stream_request).and_raise(SurrealDB::RequestInterruptedError, 'dropped')
+      tx = client.begin_transaction
+      expect { tx.query_stream('SELECT * FROM person').to_a }.to raise_error(SurrealDB::RequestInterruptedError)
+      expect(tx).not_to be_open
+    end
+
     it 'refuses requests after the transaction is finished' do
       tx = client.begin_transaction
       tx.commit
@@ -357,6 +365,14 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
     expect(connection).to have_received(:send_request).with('query', ['RETURN 2'])
   end
 
+  it 'still takes query variables as keywords' do
+    client.query('RETURN $min', min: 1)
+    client.query_raw('RETURN $a + $b', { 'a' => 1 }, b: 2, timeout: 4)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN $min', { min: 1 }])
+    expect(connection).to have_received(:send_request)
+      .with('query', ['RETURN $a + $b', { 'a' => 1, b: 2 }], timeout: 4)
+  end
+
   it 'applies with_timeout to the block, innermost first, and restores it after' do
     client.with_timeout(5) do
       client.select('a')
@@ -425,8 +441,24 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
         client.new_session.close
         client.transaction { |tx| tx.query_raw('RETURN 1') }
       end
-      expect(connection.timeouts).to include('version' => 0.3, 'attach' => 0.3, 'detach' => 0.3,
-                                             'begin' => 0.3, 'query' => 0.3, 'commit' => 0.3)
+      about = a_value_within(0.05).of(0.3)
+      expect(connection.timeouts).to include('version' => about, 'attach' => about, 'detach' => about,
+                                             'begin' => about, 'query' => about, 'commit' => about)
+    end
+
+    it 'applies with_timeout to the HTTP routes too: health, import and export' do
+      endpoint = instance_double(SurrealDB::Connections::HTTPEndpoint)
+      allow(endpoint).to receive(:request) do |_verb, path, timeout: nil, **|
+        connection.timeouts[path] = timeout
+        Net::HTTPOK.new('1.1', '200', 'OK')
+      end
+      allow(connection).to receive(:http_endpoint).and_return(endpoint)
+      client.with_timeout(0.3) do
+        client.health
+        connection.http_request(:post, '/import', body: '')
+      end
+      expect(connection.timeouts).to include('/health' => a_value_within(0.05).of(0.3),
+                                             '/import' => a_value_within(0.05).of(0.3))
     end
   end
 

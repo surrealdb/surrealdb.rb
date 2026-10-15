@@ -24,6 +24,8 @@ module SurrealDB
     # Live queries started by a LIVE SELECT statement inside {#query} are not
     # tracked and are not restored.
     class ReliableWebSocket < Base
+      include ReliableRestore
+
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
       # @return [Integer] max reconnection attempts before giving up
@@ -50,6 +52,9 @@ module SurrealDB
         # Transactions, by id, with the connection generation they began on.
         @generation = 0
         @transactions = {}
+        # Sessions whose credentials could not be restored, by the generation
+        # that lost them.
+        @auth_lost = {}
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
@@ -91,34 +96,43 @@ module SurrealDB
       # the connection dropped under is not restarted, since its statements
       # may have run.
       def stream_request(method, params = [], session: nil, txn: nil, timeout: nil, &)
-        await_restore
-        check_transaction_alive(txn)
-        options = { session: session, txn: txn }
-        options[:timeout] = timeout if timeout
+        since = generation_seen
+        deadline = call_deadline(timeout)
+        await_restore(deadline, method)
         begin
-          @inner.stream_request(method, params, **options, &)
+          start_stream(method, params, session, txn, since, deadline, &)
         rescue NotConnectedError
-          ensure_connected!
-          check_transaction_alive(txn)
-          @inner.stream_request(method, params, **options, &)
+          recover(deadline, method)
+          start_stream(method, params, session, txn, since, deadline, &)
         end
-      rescue NotConnectedError, RequestInterruptedError
+      rescue NotConnectedError, RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        ensure_connected!
-        raise_interrupted(method, e)
+        interrupted!(method, e, deadline)
       end
 
       def http_endpoint
         @inner.http_endpoint
       end
 
-      def http_request(...)
-        @inner.http_request(...)
+      # The request goes over HTTP, but renewing the session's token first
+      # needs the WebSocket, so it waits for a reconnect like {#send_request}.
+      def http_request(verb, path, session: nil, timeout: nil, **, &)
+        since = generation_seen
+        deadline = call_deadline(timeout)
+        recover(deadline, path)
+        check_auth_kept(path, session, since)
+        begin
+          @inner.http_request(verb, path, session: session, **time_left(deadline, path), **, &)
+        rescue NotConnectedError # renewing the token; the request was not sent
+          recover(deadline, path)
+          check_auth_kept(path, session, since)
+          @inner.http_request(verb, path, session: session, **time_left(deadline, path), **, &)
+        end
       end
 
-      def health
-        @inner.health
+      def health(timeout: nil)
+        @inner.health(**time_left(call_deadline(timeout), 'health'))
       end
 
       def session_state(session = nil)
@@ -129,9 +143,12 @@ module SurrealDB
         @inner.attached_sessions
       end
 
+      # A timeout covers waiting for a reconnect as well as the response.
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
-        await_restore
-        deliver(method, params, session, txn, call_timeout(timeout))
+        since = generation_seen
+        deadline = call_deadline(timeout)
+        await_restore(deadline, method)
+        deliver(method, params, session, txn, since, deadline)
       rescue RequestInterruptedError
         # Ending a lost transaction ends our record of it too.
         @state_mutex.synchronize { @transactions.delete(params[0].to_s) } if TXN_FINISH.include?(method)
@@ -163,29 +180,59 @@ module SurrealDB
       # Sends a request, reconnecting when the connection is gone: a request
       # that never left is sent on the new connection, one that was in flight
       # only when repeating it is harmless.
-      def deliver(method, params, session, txn, timeout)
+      # Neither is sent when a reconnect since the request was made left its
+      # session signed out.
+      def deliver(method, params, session, txn, since, deadline) # rubocop:disable Metrics/ParameterLists
         transaction = txn || (params[0] if TXN_FINISH.include?(method))
         check_transaction_alive(transaction)
-        attempt(method, params, session, txn, timeout)
+        check_auth_kept(method, session, since)
+        attempt(method, params, session, txn, deadline)
       rescue NotConnectedError
-        ensure_connected!
+        recover(deadline, method)
         check_transaction_alive(transaction)
-        attempt(method, params, session, txn, timeout)
-      rescue RequestInterruptedError
+        check_auth_kept(method, session, since)
+        attempt(method, params, session, txn, deadline)
+      rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        ensure_connected!
-        raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
+        interrupted!(method, e, deadline) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
+        recover(deadline, method)
 
-        attempt(method, params, session, txn, timeout)
+        check_auth_kept(method, session, since)
+        attempt(method, params, session, txn, deadline)
+      end
+
+      # The connection generation a new request belongs to. A request made
+      # during a restore belongs to the one before: it was made expecting the
+      # state the restore is bringing back.
+      def generation_seen
+        generation = @generation
+        @restoring ? generation - 1 : generation
+      end
+
+      # Signing in, out or again needs no previous identity.
+      def check_auth_kept(request, session, since)
+        return if Base::NO_RENEWAL.include?(request)
+
+        lost = @state_mutex.synchronize { @auth_lost[session] }
+        return if lost.nil? || lost <= since
+
+        raise AuthenticationError,
+              "#{session ? "session #{session}" : 'the default session'} could not authenticate again after " \
+              "the connection was lost, so it is signed out; '#{request}' was not sent"
+      end
+
+      def start_stream(method, params, session, txn, since, deadline, &) # rubocop:disable Metrics/ParameterLists
+        check_transaction_alive(txn)
+        check_auth_kept(method, session, since)
+        @inner.stream_request(method, params, session: session, txn: txn, **time_left(deadline, method), &)
       end
 
       # Sends one request, translating live query ids the caller holds into
       # the ids they have on the current connection.
-      def attempt(method, params, session, txn, timeout)
+      def attempt(method, params, session, txn, deadline)
         params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
-        result = @inner.send_request(method, params, session: session, txn: txn,
-                                                     **(timeout ? { timeout: timeout } : {}))
+        result = @inner.send_request(method, params, session: session, txn: txn, **time_left(deadline, method))
         track_live(method, params, session, result)
         result
       end
@@ -199,17 +246,8 @@ module SurrealDB
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
         when Protocol::Methods::RESET then forget_lives(session)
+        when Protocol::Methods::DETACH then forget_lives(session) if session
         end
-      end
-
-      # The server killed the session's live queries; drop them and their
-      # handlers, which would otherwise never run again but stay reachable.
-      def forget_lives(session)
-        gone = @state_mutex.synchronize do
-          keys = @lives.select { |_, live| live[:session] == session }.keys
-          keys.map { |key| @lives.delete(key) }
-        end
-        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       def track_transaction(method, params, result)
@@ -219,6 +257,17 @@ module SurrealDB
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
+      end
+
+      # The server ended the session's live queries (reset, detach); drop them and
+      # their handlers, which would otherwise never run again but stay
+      # reachable, and would be restored into a session that no longer exists.
+      def forget_lives(session)
+        gone = @state_mutex.synchronize do
+          keys = @lives.select { |_, live| live[:session] == session }.keys
+          keys.map { |key| @lives.delete(key) }
+        end
+        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       # A transaction lives on the connection it began on; once that is gone,
@@ -250,7 +299,14 @@ module SurrealDB
         end
       end
 
-      def raise_interrupted(method, error)
+      # Reconnects, waiting no longer than the deadline, and reports the
+      # request that was in flight as interrupted.
+      def interrupted!(method, error, deadline)
+        begin
+          recover(deadline, method)
+        rescue TimeoutError
+          nil # the reconnect carries on in the background
+        end
         raise RequestInterruptedError,
               "connection lost while '#{method}' was in flight (#{error.message}); " \
               'it was not sent again because it may already have run'
@@ -287,8 +343,23 @@ module SurrealDB
 
       # A request made while a reconnect is restoring sessions would reach a
       # session that is not back yet; wait for the restore to finish.
-      def await_restore
-        @reconnect_mutex.synchronize { nil } if @restoring
+      def await_restore(deadline, request)
+        recover(deadline, request) if @restoring
+      end
+
+      # Reconnects and restores state, or waits for the reconnect already
+      # under way. A request with a deadline stops waiting at the deadline;
+      # the reconnect carries on in the background.
+      # @raise [TimeoutError] when the deadline passes first
+      def recover(deadline, request)
+        return ensure_connected! if deadline.nil?
+
+        worker = Thread.new { ensure_connected! }
+        worker.report_on_exception = false
+        left = deadline - monotonic_now
+        return if worker.join(left.clamp(0, nil))
+
+        raise TimeoutError, "'#{request}' timed out waiting for the connection to come back"
       end
 
       # @raise [ConnectionError] if all attempts fail
@@ -323,74 +394,6 @@ module SurrealDB
       rescue ConnectionError => e
         log(:warn, "Reconnection attempt #{attempt} failed: #{e.message}")
         false
-      end
-
-      # One session failing to restore does not stop the others.
-      def restore_sessions
-        restore_session(nil, @inner.session_state(nil))
-        @inner.attached_sessions.each do |id, state|
-          @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
-          restore_session(id, state)
-        rescue ServerError => e
-          log(:error, "Could not restore session #{id}: #{e.message}")
-        end
-      end
-
-      def restore_session(id, state)
-        state = state.copy
-        restore_auth(id, state)
-        @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id) if
-          state.namespace || state.database
-        state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
-      end
-
-      # Re-presents the token; when the server no longer accepts it (it
-      # expired while we were away), uses the refresh token, or signs in again
-      # with the credentials the session last signed in with. A signup is
-      # never repeated. A session that cannot authenticate again is left
-      # signed out, and the rest of its state is still restored.
-      def restore_auth(id, state)
-        return unless state.access_token
-
-        @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
-      rescue ServerError => e
-        return drop_auth(id, e) unless state.renewable?
-
-        log(:info, "Stored token rejected after reconnect (#{e.message}); renewing it")
-        renew_auth(id, state)
-      end
-
-      def renew_auth(id, state)
-        if state.refresh_token
-          begin
-            return @inner.send_request(Protocol::Methods::REFRESH, [state.tokens], session: id)
-          rescue ServerError => e
-            return drop_auth(id, e) unless state.signin
-          end
-        end
-        @inner.send_request(*state.signin, session: id)
-      rescue ServerError => e
-        drop_auth(id, e)
-      end
-
-      # Forgets the credentials, so the session state says what the server
-      # now has: an unauthenticated session.
-      def drop_auth(id, error)
-        log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
-                   "reconnecting (#{error.message}); it is now signed out")
-        @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
-      end
-
-      def restore_live_queries
-        lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
-        lives.each do |key, live|
-          @inner.remove_notification_handler(live[:current].to_s)
-          fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          @state_mutex.synchronize { @lives[key][:current] = fresh if @lives.key?(key) }
-          @inner.on_notification(fresh.to_s, relabel(key, live[:handler])) if live[:handler]
-        rescue ServerError => e
-          log(:error, "Could not restore live query #{key}: #{e.message}")
-        end
       end
     end
   end

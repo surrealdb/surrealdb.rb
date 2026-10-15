@@ -34,14 +34,17 @@ module SurrealDB
       # @param body [String, IO, nil]
       # @param headers [Hash{String => String}]
       # @param state [SessionState, nil] supplies the namespace, database and token
+      # @param timeout [Numeric, nil] open and read timeout for this request;
+      #   nil for the endpoint's
       # @yield [String] body chunks, when given
       # @return [Net::HTTPResponse]
-      def request(verb, path, body: nil, headers: {}, state: nil, &block)
+      def request(verb, path, body: nil, headers: {}, state: nil, timeout: nil, &block) # rubocop:disable Metrics/ParameterLists
         req = build(verb, path, body, headers, state)
+        block &&= guard(block)
         http = Net::HTTP.new(@base.host, @base.port)
         http.use_ssl = @base.scheme == 'https'
-        http.open_timeout = @timeout
-        http.read_timeout = @timeout
+        http.open_timeout = timeout || @timeout
+        http.read_timeout = timeout || @timeout
         http.start do |conn|
           conn.request(req) do |response|
             if block && response.is_a?(Net::HTTPSuccess)
@@ -52,10 +55,25 @@ module SurrealDB
             return response
           end
         end
+      rescue BlockError => e
+        raise e.original
       rescue Net::OpenTimeout, Net::ReadTimeout => e
         raise TimeoutError, "HTTP #{path} timed out: #{e.message}"
       rescue SystemCallError, IOError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"
+      end
+
+      # An error the caller's block raised while reading a streamed body. It
+      # is carried past the transport rescues and re-raised unchanged, so a
+      # local failure (a full disk, say) is not reported as a network one.
+      class BlockError < StandardError
+        # @return [Exception]
+        attr_reader :original
+
+        def initialize(original)
+          @original = original
+          super(original.message)
+        end
       end
 
       # Raises the error a failed response stands for.
@@ -106,6 +124,14 @@ module SurrealDB
           req['Transfer-Encoding'] = 'chunked' unless req['Content-Length']
         elsif body
           req.body = body
+        end
+      end
+
+      def guard(block)
+        lambda do |chunk|
+          block.call(chunk)
+        rescue StandardError => e
+          raise BlockError, e
         end
       end
     end

@@ -8,6 +8,13 @@ module SurrealDB
   module QueryMethods
     # JSON-RPC's code for a method the server does not have.
     METHOD_NOT_FOUND = -32_601
+    # JSON-RPC's code for a method the server's capabilities deny.
+    METHOD_NOT_ALLOWED = -32_602
+    # A server older than 3.3 has no `query_stream`; one started with
+    # `--deny-rpc query_stream` refuses it before running anything. Either
+    # way the query can still run buffered.
+    STREAMING_REFUSED = [METHOD_NOT_FOUND, METHOD_NOT_ALLOWED].freeze
+
     # --- CRUD ---
 
     # Selects all records from a table, or a single record by ID.
@@ -108,16 +115,21 @@ module SurrealDB
     # {#query_raw} to see every statement's outcome, including the ones that
     # succeeded alongside a failure.
     #
+    # Variables can be given as a Hash or as keywords. `timeout:` is the call
+    # timeout, so a variable named `timeout` must go in the Hash.
+    #
     # @example
     #   db.query("RETURN 1; SELECT * FROM person") # => [1, [{...}, ...]]
+    #   db.query("SELECT * FROM person WHERE age > $min", min: 18)
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
+    # @param named [Hash] more query variables, as keywords
     # @return [Array] one result per statement
     # @raise [ServerError] when a statement fails
     # @raise [TimeoutError] when the result does not arrive in time
-    def query(sql, vars = {}, timeout: nil)
-      query_raw(sql, vars, timeout: timeout).map do |statement|
+    def query(sql, vars = {}, timeout: nil, **named)
+      query_raw(sql, vars, timeout: timeout, **named).map do |statement|
         raise statement.to_error if statement.error?
 
         statement.result
@@ -131,8 +143,10 @@ module SurrealDB
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
+    # @param named [Hash] more query variables, as keywords (see {#query})
     # @return [Array<QueryResult>]
-    def query_raw(sql, vars = {}, timeout: nil)
+    def query_raw(sql, vars = {}, timeout: nil, **named)
+      vars = vars.merge(named) unless named.empty?
       params = [sql]
       params << vars unless vars.empty?
       raw = rpc(Protocol::Methods::QUERY, params, timeout: timeout)
@@ -161,11 +175,14 @@ module SurrealDB
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @param timeout [Numeric, nil] seconds to wait for each chunk
+    # @param named [Hash] more query variables, as keywords (see {#query})
     # @yield [QueryChunk]
     # @return [Enumerator, nil] an Enumerator of chunks without a block
     # @raise [ServerError] when a statement fails, after its chunks are yielded
-    def query_stream(sql, vars = {}, timeout: nil, &block)
-      return enum_for(:query_stream, sql, vars, timeout: timeout) unless block
+    def query_stream(sql, vars = {}, timeout: nil, **named, &block)
+      return enum_for(:query_stream, sql, vars, timeout: timeout, **named) unless block
+
+      vars = vars.merge(named) unless named.empty?
 
       errors = []
       each_query_chunk(sql, vars, timeout) do |chunk|
@@ -234,8 +251,8 @@ module SurrealDB
         with_implied_result(chunk, with_result, &block) if chunk
       end
       true
-    rescue NotFoundError => e
-      raise if started || e.code != METHOD_NOT_FOUND
+    rescue NotFoundError, NotAllowedError => e
+      raise if started || !STREAMING_REFUSED.include?(e.code)
 
       connection.streaming_unavailable!
       false

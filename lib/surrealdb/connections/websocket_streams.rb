@@ -29,6 +29,12 @@ module SurrealDB
         @queue.close
       end
 
+      # The caller stopped reading: frames still on their way are dropped.
+      # Never blocks.
+      def close
+        @queue.close
+      end
+
       # @raise [Error] the error the stream failed with, or TimeoutError
       def pop(timeout)
         frame = @queue.pop(timeout: timeout)
@@ -67,6 +73,9 @@ module SurrealDB
           end
         ensure
           @mutex.synchronize { @streams.delete(id) }
+          # Frees the reader thread if it is waiting for room for another
+          # frame, so it can read the cancellation's response.
+          frames.close
           cancel_stream(id) unless done
         end
       end
