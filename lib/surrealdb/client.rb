@@ -48,7 +48,14 @@ module SurrealDB
     #   (the connection is closed again)
     def connect
       @connection.connect
-      check_server_version
+      begin
+        check_server_version
+      rescue StandardError
+        # Whatever went wrong, the caller gets no usable client back, so the
+        # transport must not be left open.
+        close_quietly
+        raise
+      end
       self
     end
 
@@ -181,9 +188,12 @@ module SurrealDB
     def check_server_version
       @server_version = @connection.send_request(Protocol::Methods::VERSION).to_s
       ServerVersion.check!(@server_version) if @version_check
-    rescue UnsupportedVersionError
+    end
+
+    def close_quietly
       @connection.close
-      raise
+    rescue StandardError => e
+      SurrealDB.configuration.logger&.debug("Closing after a failed connect also failed: #{e.message}")
     end
 
     def rpc(method, params = [])
