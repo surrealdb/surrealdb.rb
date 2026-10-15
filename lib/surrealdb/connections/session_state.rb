@@ -92,8 +92,23 @@ module SurrealDB
         when Array then value.map { |v| snapshot(v) }
         when Set then Set.new(value) { |v| snapshot(v) }
         when String then value.frozen? ? value : value.dup
-        else value
+        when SurrealDB::None then value
+        else sdk_value?(value) ? snapshot_fields(value) : value
         end
+      end
+
+      # The SDK's own types (a RecordID, a Range, a geometry) can hold
+      # mutable values too, such as an Array id.
+      def sdk_value?(value)
+        value.class.name&.start_with?('SurrealDB::')
+      end
+
+      def snapshot_fields(value)
+        copy = value.dup
+        value.instance_variables.each do |name|
+          copy.instance_variable_set(name, snapshot(value.instance_variable_get(name)))
+        end
+        copy
       end
 
       def track_use(params, result)
