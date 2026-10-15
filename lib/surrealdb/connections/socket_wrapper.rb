@@ -25,7 +25,10 @@ module SurrealDB
       def write(data)
         return @socket.write(data) if @deadline.nil?
 
+        # The deadline is checked before every write: a peer that keeps
+        # taking a little at a time never makes a write wait.
         until data.empty?
+          time_left
           written = @socket.write_nonblock(data, exception: false)
           case written
           when :wait_writable, :wait_readable then wait(written)
@@ -37,8 +40,14 @@ module SurrealDB
       private
 
       def wait(readiness)
+        raise WriteTimeout unless @socket.to_io.public_send(readiness, time_left)
+      end
+
+      def time_left
         left = @deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        raise WriteTimeout if left <= 0 || !@socket.to_io.public_send(readiness, left)
+        raise WriteTimeout if left <= 0
+
+        left
       end
     end
   end

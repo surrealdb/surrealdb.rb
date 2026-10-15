@@ -53,7 +53,7 @@ module SurrealDB
         # Live queries started with `live`, by the id the caller was given:
         # { params:, session:, current: id on the current connection, handler: }
         @lives = {}
-        # Transactions, by id, with the connection generation they began on.
+        # Transactions, by id: [connection generation they began on, session].
         @generation = 0
         @transactions = {}
         # Sessions whose credentials could not be restored, by the generation
@@ -103,13 +103,9 @@ module SurrealDB
         @inner.connected? && !@restoring
       end
 
-      def supports_live_queries?
-        true
-      end
+      def supports_live_queries? = true
 
-      def supports_transactions?
-        true
-      end
+      def supports_transactions? = true
 
       def http_endpoint
         @inner.http_endpoint
@@ -252,22 +248,22 @@ module SurrealDB
       end
 
       def track_live(method, params, session, result)
-        track_transaction(method, params, result)
+        track_transaction(method, params, session, result)
         case method
         when Protocol::Methods::LIVE
           @state_mutex.synchronize { @lives[result.to_s] = { params: params, session: session, current: result } }
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
-        when Protocol::Methods::RESET then forget_lives(session)
-        when Protocol::Methods::DETACH then forget_lives(session) if session
+        when Protocol::Methods::RESET then forget_session(session)
+        when Protocol::Methods::DETACH then forget_session(session) if session
         end
       end
 
-      def track_transaction(method, params, result)
+      def track_transaction(method, params, session, result)
         case method
         when Protocol::Methods::BEGIN_TXN
-          @state_mutex.synchronize { @transactions[result.to_s] = @generation }
+          @state_mutex.synchronize { @transactions[result.to_s] = [@generation, session] }
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
@@ -308,7 +304,7 @@ module SurrealDB
       # forget it and its live queries rather than restoring them.
       def detach_lost(session)
         @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
-        forget_lives(session)
+        forget_session(session)
         [[], session]
       end
 
@@ -321,10 +317,15 @@ module SurrealDB
       # The server ended the session's live queries (reset, detach); drop them and
       # their handlers, which would otherwise never run again but stay
       # reachable, and would be restored into a session that no longer exists.
+      # A reset or a detach ends the session's live queries and transactions.
+      def forget_session(session)
+        @state_mutex.synchronize { @transactions.delete_if { |_, (_, owner)| owner == session } }
+        forget_lives(session)
+      end
+
       def forget_lives(session)
         gone = @state_mutex.synchronize do
-          keys = @lives.select { |_, live| live[:session] == session }.keys
-          keys.map { |key| @lives.delete(key) }
+          @lives.select { |_, live| live[:session] == session }.keys.map { |key| @lives.delete(key) }
         end
         gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
@@ -335,7 +336,7 @@ module SurrealDB
       def check_transaction_alive(txn)
         return if txn.nil?
 
-        began = @state_mutex.synchronize { @transactions[txn.to_s] }
+        began = @state_mutex.synchronize { @transactions[txn.to_s]&.first }
         return if began.nil? || began == @generation
 
         raise RequestInterruptedError,
