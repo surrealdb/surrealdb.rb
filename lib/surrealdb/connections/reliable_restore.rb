@@ -10,7 +10,11 @@ module SurrealDB
 
       # One session failing to restore does not stop the others.
       def restore_sessions
-        restore_session(nil, @inner.session_state(nil))
+        begin
+          restore_session(nil, @inner.session_state(nil))
+        rescue ServerError => e
+          log(:error, "Could not restore the default session: #{e.message}")
+        end
         @inner.attached_sessions.each do |id, state|
           @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
           restore_session(id, state)

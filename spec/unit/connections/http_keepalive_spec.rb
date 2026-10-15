@@ -57,6 +57,29 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  it 'reads the response within the time opening the socket left, not a fresh timeout' do
+    server = ScriptedHTTPServer.new(%i[drop ok])
+    http = http_to(server)
+    net = http.instance_variable_get(:@http)
+    read_timeout = nil
+    allow(net).to receive(:connect).and_wrap_original do |original|
+      sleep 0.3
+      original.call
+    end
+    allow(net).to receive(:request).and_wrap_original do |original, *args|
+      read_timeout = net.read_timeout
+      original.call(*args)
+    end
+    Timeout.timeout(5) do
+      expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
+      http.send_request('ping', timeout: 1)
+    end
+    expect(read_timeout).to be_within(0.1).of(0.7)
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'does not resend a write, which the server may already have run' do
     server = ScriptedHTTPServer.new(%i[ok drop ok])
     http = http_to(server)
@@ -75,7 +98,8 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
     Timeout.timeout(5) do
-      expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::ConnectionError)
+      # The server read the whole request before dropping it: it may have run.
+      expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::RequestInterruptedError)
       expect(server.requests).to eq(1)
       expect(http).to be_connected
       expect(http.send_request('ping')).to eq('pong')
@@ -83,6 +107,12 @@ RSpec.describe SurrealDB::Connections::HTTP do
   ensure
     http&.close
     server&.close
+  end
+end
+
+RSpec.describe SurrealDB::Protocol::Methods do
+  it 'does not count detach as safe to repeat, as a second one finds no session' do
+    expect(described_class::SAFE_TO_REPEAT).not_to include('detach')
   end
 end
 

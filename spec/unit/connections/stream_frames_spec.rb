@@ -75,4 +75,17 @@ RSpec.describe SurrealDB::Connections::WebSocket, '#execute_stream' do
     end
     expect(reader_freed).to be(true)
   end
+
+  it 'stops streaming on this connection when the server refuses to stop a stream' do
+    connection.instance_variable_set(:@connected, true)
+    allow(connection).to receive(:write_frame) do
+      id = connection.instance_variable_get(:@streams).keys.first
+      frame = SurrealDB::CBOR::Encoder.encode({ 'id' => id, 'result' => { 'stream' => 'begin' } })
+      connection.send(:deliver_response, id, frame)
+    end
+    allow(connection).to receive(:execute).and_raise(SurrealDB::NotAllowedError.new('Method not allowed'))
+    expect(connection).to be_supports_streaming
+    connection.send(:execute_stream, 'query_stream', ['SELECT 1']) { break }
+    expect(connection).not_to be_supports_streaming
+  end
 end
