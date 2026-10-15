@@ -130,10 +130,6 @@ module SurrealDB
 
       private
 
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
       def remaining(deadline, what)
         left = deadline - monotonic_now
         raise ConnectionError, "#{what} timed out after #{@connect_timeout}s" if left <= 0
@@ -152,16 +148,26 @@ module SurrealDB
       # Resolves the host, then tries its addresses in turn, all within the
       # one deadline. (Socket.tcp gives each address its own connect_timeout
       # and does not bound the lookup on every platform.)
+      # An address can also time out on its own (the OS gives up on it)
+      # before the deadline; the next one gets the time left.
       def tcp_connect(host, port, deadline)
         error = nil
         resolve(host, port, deadline).each do |addr|
-          return addr.connect(timeout: remaining(deadline, 'TCP connect'))
-        rescue Errno::ETIMEDOUT, IO::TimeoutError
-          raise ConnectionError, "TCP connect to #{host}:#{port} timed out after #{@connect_timeout}s"
-        rescue SystemCallError => e
+          left = deadline - monotonic_now
+          break if left <= 0
+
+          return addr.connect(timeout: left)
+        rescue SystemCallError, IO::TimeoutError => e
           error = e
         end
-        raise ConnectionError, "cannot connect to #{host}:#{port}: #{error&.message || 'no addresses'}"
+        raise tcp_connect_error(host, port, error, monotonic_now >= deadline)
+      end
+
+      def tcp_connect_error(host, port, error, out_of_time)
+        timed_out = out_of_time || error.is_a?(Errno::ETIMEDOUT) || error.is_a?(IO::TimeoutError)
+        return ConnectionError.new("TCP connect to #{host}:#{port} timed out after #{@connect_timeout}s") if timed_out
+
+        ConnectionError.new("cannot connect to #{host}:#{port}: #{error&.message || 'no addresses'}")
       end
 
       # getaddrinfo cannot be interrupted, so the lookup runs in a thread
@@ -391,9 +397,9 @@ module SurrealDB
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
       def wait_for_response(entry, timeout)
         result = @mutex.synchronize do
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+          deadline = monotonic_now + timeout
           while entry[:result].nil?
-            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            remaining = deadline - monotonic_now
             raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)

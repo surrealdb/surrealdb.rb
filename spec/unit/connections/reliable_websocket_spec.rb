@@ -305,6 +305,32 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(reliable).to be_connected
     end
 
+    it 'restores the attached sessions and live queries when the default session cannot be restored' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('use', %w[ns gone])
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('use', %w[ns ok], session: session)
+      reliable.send_request('live', ['person'])
+      allow(inner).to receive(:send_request).and_call_original
+      allow(inner).to receive(:send_request).with('use', %w[ns gone], any_args)
+                                            .and_raise(SurrealDB::ServerError, 'no such database')
+      inner.calls.clear
+      drop
+      expect(methods_sent).to include('attach', 'live')
+      expect(inner.calls).to include(['use', %w[ns ok], session, nil])
+    end
+
+    it 'does not start a live query again when the connection dropped under its kill' do
+      original = reliable.send_request('live', ['person'])
+      reliable.on_notification(original, proc {})
+      inner.calls.clear
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      expect(reliable.send_request('kill', [original])).to be_nil
+      expect(methods_sent).to eq(%w[kill])
+      expect(inner.handlers).to be_empty
+      expect(inner.connects).to eq(2)
+    end
+
     it 'never repeats a signup' do
       reliable.send_request('signup', [{ 'access' => 'user', 'email' => 'a@b.c' }])
       inner.calls.clear

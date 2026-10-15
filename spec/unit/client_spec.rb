@@ -227,6 +227,14 @@ RSpec.describe SurrealDB::Client do
       expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
     end
 
+    it 'is lost when a request through it times out, as it may still be running' do
+      allow(connection).to receive(:send_request).with('query', any_args).and_raise(SurrealDB::TimeoutError, 'slow')
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::TimeoutError)
+      expect(tx).not_to be_open
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
+    end
+
     it 'refuses requests after the transaction is finished' do
       tx = client.begin_transaction
       tx.commit
@@ -457,5 +465,58 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
   it 'refuses a timeout that is not a positive number' do
     expect { client.with_timeout(0) { nil } }.to raise_error(ArgumentError)
     expect { client.with_timeout('5') { nil } }.to raise_error(ArgumentError)
+  end
+end
+
+RSpec.describe SurrealDB::Client, '#import' do
+  let(:connection) { instance_double(SurrealDB::Connections::WebSocket) }
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before { client.instance_variable_set(:@connection, connection) }
+
+  def answer(code, body)
+    klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)
+    klass.new('1.1', code.to_s, '').tap do |response|
+      response.instance_variable_set(:@body, body)
+      response.instance_variable_set(:@read, true)
+    end
+  end
+
+  it 'raises when a successful import answers with something it cannot read' do
+    allow(connection).to receive(:http_request).and_return(answer(200, 'not cbor'))
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /import's result/)
+  end
+
+  it 'is fine with a successful import that reports no failures' do
+    allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode([])))
+    expect(client.import("OPTION IMPORT;\nCREATE x;")).to be_nil
+  end
+end
+
+RSpec.describe SurrealDB::Client, '#fork_session' do
+  let(:connection) do
+    Class.new(SurrealDB::Connections::Base) do
+      def initialize(url)
+        super
+        @connected = true
+      end
+
+      protected
+
+      def execute(method, *, **)
+        { 'access' => 'a1', 'refresh' => 'r1' } if method == 'signin'
+      end
+    end.new('ws://localhost:8000')
+  end
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before { client.instance_variable_set(:@connection, connection) }
+
+  it 'gives the fork what it needs to renew its token: the refresh token and the sign-in' do
+    client.signin({ 'user' => 'u', 'pass' => 'p' })
+    fork = client.fork_session
+    state = connection.session_state(fork.id)
+    expect(state.tokens).to eq({ 'access' => 'a1', 'refresh' => 'r1' })
+    expect(state.signin).to eq(['signin', [{ 'user' => 'u', 'pass' => 'p' }]])
   end
 end

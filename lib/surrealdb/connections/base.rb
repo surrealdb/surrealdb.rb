@@ -94,13 +94,15 @@ module SurrealDB
       # Sends a request to one of the server's HTTP routes (/import, /export)
       # with a session's namespace, database and credentials, renewing its
       # access token first as {#send_request} does. Like RPC requests, it is
-      # refused once the connection has been closed.
+      # refused once the connection, or the session, has been closed.
       # @param session [Uuid, nil]
       # @param timeout [Numeric, nil] as for {#send_request}
       # @return [Net::HTTPResponse]
       # @raise [NotConnectedError] if the connection is not open
+      # @raise [SessionError] if the session has been detached
       def http_request(verb, path, session: nil, timeout: nil, **, &)
         raise NotConnectedError, 'not connected' unless @connected
+        raise SessionError, "session #{session} is closed" if session && session_state(session).nil?
 
         deadline = call_deadline(timeout)
         renew_before(path, session, deadline)
@@ -222,7 +224,7 @@ module SurrealDB
       # (renewing the token, a reconnect, the response) counts against it.
       def call_deadline(timeout)
         timeout = call_timeout(timeout)
-        timeout && (Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout)
+        timeout && (monotonic_now + timeout)
       end
 
       # The time a request has left, as options for the transport.
@@ -231,10 +233,14 @@ module SurrealDB
       def time_left(deadline, request)
         return {} if deadline.nil?
 
-        left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        left = deadline - monotonic_now
         raise TimeoutError, "'#{request}' timed out before it could be sent" unless left.positive?
 
         { timeout: left }
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       def log(level, message)

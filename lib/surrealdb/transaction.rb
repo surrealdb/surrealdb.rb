@@ -94,10 +94,12 @@ module SurrealDB
     end
 
     # A transaction does not outlive its connection, so once a request
-    # through it is interrupted the transaction is over.
+    # through it is interrupted the transaction is over. One that timed out
+    # may still be running on the server, or have committed, so the
+    # transaction cannot safely be used after that either.
     def request(method, params, **)
       @connection.send_request(method, params, session: @session, **)
-    rescue RequestInterruptedError
+    rescue RequestInterruptedError, TimeoutError
       @state = :lost
       raise
     end
