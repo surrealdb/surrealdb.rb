@@ -24,15 +24,6 @@ module SurrealDB
     # Live queries started by a LIVE SELECT statement inside {#query} are not
     # tracked and are not restored.
     class ReliableWebSocket < Base
-      # Methods that can be repeated without changing anything when it is not
-      # known whether the first attempt ran.
-      SAFE_TO_REPEAT = [
-        Protocol::Methods::PING, Protocol::Methods::VERSION, Protocol::Methods::INFO,
-        Protocol::Methods::SELECT, Protocol::Methods::USE, Protocol::Methods::LET, 'set',
-        Protocol::Methods::UNSET, Protocol::Methods::AUTHENTICATE, Protocol::Methods::INVALIDATE,
-        Protocol::Methods::SESSIONS, Protocol::Methods::DETACH
-      ].freeze
-
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
       # @return [Integer] max reconnection attempts before giving up
@@ -146,7 +137,7 @@ module SurrealDB
         raise
       rescue ConnectionError => e
         ensure_connected!
-        raise_interrupted(method, e) unless txn.nil? && SAFE_TO_REPEAT.include?(method)
+        raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
 
         attempt(method, params, session, txn)
       end

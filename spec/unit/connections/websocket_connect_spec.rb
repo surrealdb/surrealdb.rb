@@ -53,6 +53,46 @@ RSpec.describe SurrealDB::Connections::WebSocket do
     end
   end
 
+  context 'when the DNS lookup stalls' do
+    it 'gives up after connect_timeout' do
+      allow(Addrinfo).to receive(:getaddrinfo) { sleep 3 }
+      connection = described_class.new('ws://db.example.com:8000', connect_timeout: 0.3)
+      error, elapsed = connect_within(5, connection)
+      expect(error).to be_a(SurrealDB::ConnectionError)
+      expect(error.message).to match(/DNS lookup .* timed out/)
+      expect(elapsed).to be < 1
+    end
+  end
+
+  context 'when the host resolves to several unreachable addresses' do
+    it 'spends one connect_timeout across all of them, not one each' do
+      black_hole = Array.new(3) do
+        addr = instance_double(Addrinfo)
+        allow(addr).to receive(:connect) do |timeout:|
+          sleep timeout
+          raise Errno::ETIMEDOUT
+        end
+        addr
+      end
+      allow(Addrinfo).to receive(:getaddrinfo).and_return(black_hole)
+      connection = described_class.new('ws://db.example.com:8000', connect_timeout: 0.3)
+      error, elapsed = connect_within(5, connection)
+      expect(error.message).to match(/TCP connect .* timed out/)
+      expect(elapsed).to be < 0.6
+    end
+
+    it 'moves on to the next address when one refuses' do
+      refused = instance_double(Addrinfo)
+      allow(refused).to receive(:connect).and_raise(Errno::ECONNREFUSED)
+      second = instance_double(Addrinfo)
+      allow(second).to receive(:connect).and_raise(Errno::EHOSTUNREACH)
+      allow(Addrinfo).to receive(:getaddrinfo).and_return([refused, second])
+      error, = connect_within(5, described_class.new('ws://db.example.com:8000', connect_timeout: 1))
+      expect(error.message).to start_with('cannot connect to db.example.com:8000')
+      expect(second).to have_received(:connect)
+    end
+  end
+
   it 'defaults connect_timeout to the request timeout' do
     expect(described_class.new('ws://localhost:1', timeout: 7).connect_timeout).to eq(7)
   end

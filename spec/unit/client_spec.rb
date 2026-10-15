@@ -141,7 +141,8 @@ RSpec.describe SurrealDB::Client do
 
   describe 'sessions' do
     let(:connection) do
-      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true)
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true,
+                                                         supports_session_listing?: true)
     end
     let(:client) { described_class.new('ws://localhost:8000') }
 
@@ -168,6 +169,22 @@ RSpec.describe SurrealDB::Client do
       session.close
       expect(connection).to have_received(:send_request).with('detach', [], session: session.id)
       expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    end
+
+    it 'closes a Session detached through the client' do
+      session = client.new_session
+      client.detach(session)
+      expect(session).to be_closed
+      expect { session.select('person') }.to raise_error(SurrealDB::SessionError)
+      session.close
+      expect(connection).to have_received(:send_request).with('detach', [], session: session.id).once
+    end
+
+    it 'refuses to list sessions over HTTP, where the server rejects it' do
+      http = described_class.new('http://localhost:8000')
+      allow(http.connection).to receive(:send_request)
+      expect { http.sessions }.to raise_error(SurrealDB::UnsupportedError, /listing sessions/)
+      expect(http.connection).not_to have_received(:send_request)
     end
 
     it 'detaches when the block form returns, even on error' do
