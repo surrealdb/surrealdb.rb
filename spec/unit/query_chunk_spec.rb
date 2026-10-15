@@ -78,6 +78,22 @@ RSpec.describe SurrealDB::Client, '#query_stream' do
     expect(connection).to have_received(:stream_request).once
   end
 
+  it 'falls back to a buffered query when the server denies query_stream' do
+    allow(connection).to receive_messages(supports_streaming?: true, streaming_unavailable!: nil)
+    allow(connection).to receive(:stream_request)
+      .and_raise(SurrealDB::NotAllowedError.new('Method not allowed', code: -32_602))
+    allow(connection).to receive(:send_request).with('query', ['RETURN 1'])
+                                               .and_return([{ 'status' => 'OK', 'time' => '1ms', 'result' => 1 }])
+    expect(client.query_stream('RETURN 1').map(&:kind)).to eq(%i[value finished])
+    expect(connection).to have_received(:streaming_unavailable!)
+  end
+
+  it 'raises a refusal that is not about the method itself' do
+    allow(connection).to receive(:supports_streaming?).and_return(true)
+    allow(connection).to receive(:stream_request).and_raise(SurrealDB::NotAllowedError.new('Not enough permissions'))
+    expect { client.query_stream('RETURN 1').to_a }.to raise_error(SurrealDB::NotAllowedError, /permissions/)
+  end
+
   it 'does not fall back when the stream had started' do
     allow(connection).to receive(:supports_streaming?).and_return(true)
     allow(connection).to receive(:stream_request) do |*, &block|

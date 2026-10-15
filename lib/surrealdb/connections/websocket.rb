@@ -137,10 +137,6 @@ module SurrealDB
 
       private
 
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
       def remaining(deadline, what)
         left = deadline - monotonic_now
         raise ConnectionError, "#{what} timed out after #{@connect_timeout}s" if left <= 0
@@ -245,8 +241,7 @@ module SurrealDB
 
       def wait_for_open(deadline)
         loop do
-          await_handshake_data(deadline)
-          data = read_socket
+          data = read_handshake(deadline)
           raise ConnectionError, 'connection closed during handshake' if data.nil? || data.empty?
 
           @driver.parse(data)
@@ -260,13 +255,25 @@ module SurrealDB
         end
       end
 
-      # Waits for data with the time left, rather than blocking in read: a
-      # server that accepts the TCP connection but never answers the upgrade
-      # would otherwise hang connect forever.
-      def await_handshake_data(deadline)
-        left = remaining(deadline, 'WebSocket handshake')
-        return if @socket.respond_to?(:pending) && @socket.pending.positive?
-        return if @socket.to_io.wait_readable(left)
+      # Reads handshake data with the time left, never blocking in a read: a
+      # server that accepts the connection but never answers the upgrade
+      # would otherwise hang connect forever. Over TLS the TCP socket can be
+      # readable with only part of a TLS record, on which a blocking read
+      # would wait for the rest, so the SSL socket is read without blocking.
+      def read_handshake(deadline)
+        loop do
+          return @socket.read_nonblock(16_384)
+        rescue IO::WaitReadable
+          wait_for_handshake(:wait_readable, deadline)
+        rescue IO::WaitWritable
+          wait_for_handshake(:wait_writable, deadline)
+        rescue EOFError
+          return nil
+        end
+      end
+
+      def wait_for_handshake(direction, deadline)
+        return if @socket.to_io.public_send(direction, remaining(deadline, 'WebSocket handshake'))
 
         raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
       end
@@ -397,9 +404,9 @@ module SurrealDB
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
       def wait_for_response(entry, timeout)
         result = @mutex.synchronize do
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+          deadline = monotonic_now + timeout
           while entry[:result].nil?
-            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            remaining = deadline - monotonic_now
             raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)

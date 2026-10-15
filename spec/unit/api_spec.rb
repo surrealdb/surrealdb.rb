@@ -33,6 +33,25 @@ RSpec.describe SurrealDB::Api do
     expect(sent_request['api_request']).to eq('method' => 'get', 'headers' => {}, 'query' => {})
   end
 
+  it 'sends an explicit nil body as NULL' do
+    api.post('/events', nil)
+    expect(sent_request['api_request']).to include('body' => nil)
+  end
+
+  it 'joins the prefix and the path with exactly one slash' do
+    paths = []
+    allow(target).to receive(:query) do |_, vars|
+      paths << vars['api_path']
+      [answer]
+    end
+    described_class.new(target, '/v1/').get('/users')
+    described_class.new(target, '/v1').get('users')
+    described_class.new(target, '/v1').get
+    described_class.new(target).get('users')
+    described_class.new(target).get
+    expect(paths).to eq(['/v1/users', '/v1/users', '/v1', '/users', '/'])
+  end
+
   it 'raises ApiError for the value of an unsuccessful response' do
     allow(target).to receive(:query).and_return([{ 'status' => 403, 'body' => 'nope' }])
     response = api.delete('/users/1')

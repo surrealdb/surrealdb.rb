@@ -280,11 +280,12 @@ SurrealDB.connect("ws://localhost:8000") do |db|
     };
   SQL
 
-  # ISO GQL: one result per statement, like query
+  # ISO GQL: one result per statement, like query. Needs SurrealDB 3.3, or 3.2
+  # started with --allow-experimental gql (NotAllowedError otherwise).
   begin
     names, = db.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name", { "min" => 30 })
   rescue SurrealDB::UnsupportedError
-    # the server has no GQL support (before SurrealDB 3.1)
+    # the server has no GQL support (before SurrealDB 3.2)
   end
 
   # User-defined APIs, through api::invoke in this session

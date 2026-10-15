@@ -49,14 +49,14 @@ module SurrealDB
       # @param params [Array] method parameters
       # @param session [Uuid, nil] attached session to run the request in
       # @param txn [Uuid, nil] transaction to run the request in
-      # @param timeout [Numeric, nil] seconds to wait for the response; nil for
-      #   the connection's timeout
+      # @param timeout [Numeric, nil] seconds to wait for the response, including
+      #   renewing the access token first; nil for the connection's timeout
       # @return [Object] decoded result
       # @raise [TimeoutError] when no response arrives in time
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
-        timeout = call_timeout(timeout)
-        renew_before(method, session, timeout) unless NO_RENEWAL.include?(method)
-        result = execute(method, params, session: session, txn: txn, **(timeout ? { timeout: timeout } : {}))
+        deadline = call_deadline(timeout)
+        renew_before(method, session, deadline) unless NO_RENEWAL.include?(method)
+        result = execute(method, params, session: session, txn: txn, **time_left(deadline, method))
         track_request(method, params, result, session)
         result
       end
@@ -100,8 +100,9 @@ module SurrealDB
       def stream_request(method, params = [], session: nil, txn: nil, timeout: nil, &)
         raise UnsupportedError, "#{self.class.name} cannot stream results" unless supports_streaming?
 
-        renew_tokens(session) if @renew_tokens
-        execute_stream(method, params, session: session, txn: txn, timeout: timeout, &)
+        deadline = call_deadline(timeout)
+        renew_before(method, session, deadline)
+        execute_stream(method, params, session: session, txn: txn, **time_left(deadline, method), &)
       end
 
       # Whether this connection supports attached sessions. The server keeps
@@ -125,12 +126,18 @@ module SurrealDB
 
       # Sends a request to one of the server's HTTP routes (/import, /export)
       # with a session's namespace, database and credentials, renewing its
-      # access token first as {#send_request} does.
+      # access token first as {#send_request} does. Like RPC requests, it is
+      # refused once the connection has been closed.
       # @param session [Uuid, nil]
+      # @param timeout [Numeric, nil] as for {#send_request}
       # @return [Net::HTTPResponse]
-      def http_request(verb, path, session: nil, **, &)
-        renew_before(path, session)
-        http_endpoint.request(verb, path, state: session_state(session), **, &)
+      # @raise [NotConnectedError] if the connection is not open
+      def http_request(verb, path, session: nil, timeout: nil, **, &)
+        raise NotConnectedError, 'not connected' unless @connected
+
+        deadline = call_deadline(timeout)
+        renew_before(path, session, deadline)
+        http_endpoint.request(verb, path, state: session_state(session), **time_left(deadline, path), **, &)
       end
 
       # Asks the server's HTTP /health route whether it is up and its storage
@@ -138,8 +145,9 @@ module SurrealDB
       # @return [void]
       # @raise [ServerError] when the server reports itself unhealthy
       # @raise [ConnectionError] when it cannot be reached
-      def health
-        response = http_endpoint.request(:get, '/health')
+      # @raise [TimeoutError] when it does not answer in time
+      def health(timeout: nil)
+        response = http_endpoint.request(:get, '/health', **time_left(call_deadline(timeout), 'health'))
         HTTPEndpoint.raise_for(response, 'health check') unless response.is_a?(Net::HTTPSuccess)
         nil
       end
@@ -194,11 +202,51 @@ module SurrealDB
       # Renews a session's access token shortly before it expires, so the
       # session does not silently lose its credentials: with the refresh
       # token when there is one, otherwise by signing in again with the
-      # credentials it last signed in with.
-      # Renews the session's token if it is about to expire. Losing the
-      # connection while renewing means the request itself was never sent,
-      # so it is reported as NotConnectedError, which is safe to retry,
-      # rather than as an error from the request.
+      # credentials it last signed in with. Losing the connection while
+      # renewing means the request itself was never sent, so it is reported
+      # as NotConnectedError, which is safe to retry, rather than as an error
+      # from the request.
+      def renew_before(request, session, deadline = nil)
+        return unless @renew_tokens
+
+        renew_tokens(request, session, deadline)
+      rescue NotConnectedError
+        raise
+      rescue ConnectionError => e
+        raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
+                                 "'#{request}' was not sent"
+      end
+
+      # A token that can no longer be renewed is still used until it expires;
+      # after that the request is refused, as the server would run it
+      # signed out. The renewal is a prerequisite of the request, so it counts
+      # against the request's deadline.
+      def renew_tokens(request, session, deadline = nil)
+        state = session_state(session)
+        return unless state&.expiring?(@token_refresh_margin) && state.renewable?
+
+        @renew_mutex.synchronize do
+          next unless state.expiring?(@token_refresh_margin) # another thread renewed it
+
+          log(:debug, 'Access token expiring; renewing it')
+          renew_with(state, session, time_left(deadline, request))
+        end
+      rescue ServerError => e
+        log(:warn, "Could not renew the access token: #{e.message}")
+        return unless state.expired?
+
+        raise AuthenticationError, "the access token has expired and could not be renewed (#{e.message}); " \
+                                   "'#{request}' was not sent"
+      end
+
+      def renew_with(state, session, timeout)
+        if state.refresh_token
+          send_request(Protocol::Methods::REFRESH, [state.tokens], session: session, **timeout)
+        else
+          send_request(*state.signin, session: session, **timeout)
+        end
+      end
+
       # The timeout for a request: the one given for the call, else the one
       # {QueryMethods#with_timeout} set for this connection on this thread
       # (which so covers every request, not only those made through query
@@ -207,35 +255,28 @@ module SurrealDB
         timeout || Thread.current[:surrealdb_call_timeouts]&.[](self)
       end
 
-      def renew_before(request, session, timeout = nil)
-        return unless @renew_tokens
-
-        renew_tokens(session, timeout)
-      rescue NotConnectedError
-        raise
-      rescue ConnectionError => e
-        raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
-                                 "'#{request}' was not sent"
+      # When a request's time is up, as a monotonic clock reading; nil when it
+      # uses the connection's timeout. Everything the request waits for
+      # (renewing the token, a reconnect, the response) counts against it.
+      def call_deadline(timeout)
+        timeout = call_timeout(timeout)
+        timeout && (monotonic_now + timeout)
       end
 
-      # The renewal is a prerequisite of the request, so the request's timeout
-      # bounds it too.
-      def renew_tokens(session, timeout = nil)
-        state = session_state(session)
-        return unless state&.expiring?(@token_refresh_margin) && state.renewable?
+      # The time a request has left, as options for the transport.
+      # @return [Hash] `{ timeout: seconds }`, or empty without a deadline
+      # @raise [TimeoutError] when none is left
+      def time_left(deadline, request)
+        return {} if deadline.nil?
 
-        @renew_mutex.synchronize do
-          next unless state.expiring?(@token_refresh_margin) # another thread renewed it
+        left = deadline - monotonic_now
+        raise TimeoutError, "'#{request}' timed out before it could be sent" unless left.positive?
 
-          log(:debug, 'Access token expiring; renewing it')
-          if state.refresh_token
-            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session, timeout: timeout)
-          else
-            send_request(*state.signin, session: session, timeout: timeout)
-          end
-        end
-      rescue ServerError => e
-        log(:warn, "Could not renew the access token: #{e.message}")
+        { timeout: left }
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       def log(level, message)

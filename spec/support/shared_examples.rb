@@ -111,7 +111,12 @@ RSpec.shared_examples 'CRUD operations' do
     client.create(rid('d2'), { 'name' => 'Alice' })
     client.create(rid('d3'), { 'name' => 'Bob' })
     client.delete(table)
-    expect(client.select(table)).to eq([])
+    remaining = begin
+      client.select(table)
+    rescue SurrealDB::NotFoundError # SurrealDB 3.0 may answer this for an emptied table
+      []
+    end
+    expect(remaining).to eq([])
   end
 
   it 'relates two records' do
@@ -416,6 +421,16 @@ RSpec.shared_examples 'import and export' do
     expect(chunks.join).to include('Streamy')
   end
 
+  it 'passes on an error the export block raises, not as a connection error' do
+    expect { client.export { |_chunk| raise Errno::ENOSPC } }.to raise_error(Errno::ENOSPC)
+  end
+
+  it 'refuses import and export once the client is closed' do
+    client.close
+    expect { client.export }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+  end
+
   it 'round-trips an export through an import' do
     client.create(rid('rt'), { 'name' => 'Round', 'tags' => %w[a b] })
     sql = client.export(tables: [table])
@@ -449,6 +464,18 @@ RSpec.shared_examples 'session variables' do
     client.set('temp', 1)
     client.unset('temp')
     expect(value_of('RETURN $temp')).to eq(SurrealDB::NONE)
+  end
+
+  it 'refuses a name the server protects, as it does over every transport' do
+    expect { client.set('auth', 1) }.to raise_error(SurrealDB::ServerError)
+    expect(value_of('RETURN $auth')).not_to eq(1)
+  end
+
+  it 'keeps the value as it was set, whatever the caller does to its object later' do
+    tags = ['a']
+    client.set('tags', tags)
+    tags << 'b'
+    expect(value_of('RETURN $tags')).to eq(['a'])
   end
 end
 
@@ -742,8 +769,8 @@ RSpec.shared_examples 'gql and user-defined APIs' do
     SQL
   end
 
-  def gql_supported?
-    SurrealDB::ServerVersion.parse(client.server_version) >= Gem::Version.new('3.1.0')
+  def server_older_than?(version)
+    SurrealDB::ServerVersion.parse(client.server_version) < Gem::Version.new(version)
   end
 
   it 'invokes an endpoint with its method, body, query, headers and prefix' do
@@ -767,11 +794,28 @@ RSpec.shared_examples 'gql and user-defined APIs' do
 
   it 'runs GQL queries with variables, or says the server cannot' do
     query = 'MATCH (p:person) WHERE p.age > $min RETURN p.name AS name'
-    if gql_supported?
+    if server_older_than?('3.2.0')
+      expect { client.gql(query) }.to raise_error(SurrealDB::UnsupportedError, /GQL/)
+    elsif server_older_than?('3.3.0') && !gql_enabled_on_3_2?
+      expect { client.gql(query) }.to raise_error(SurrealDB::NotAllowedError, /Experimental capability `gql`/)
+    else
       expect(client.gql(query, { 'min' => 30 })).to eq([[{ 'name' => 'Ann' }]])
       expect { client.gql('MATCH (p:person RETURN') }.to raise_error(SurrealDB::ValidationError)
-    else
-      expect { client.gql(query) }.to raise_error(SurrealDB::UnsupportedError, /GQL/)
     end
+  end
+
+  it 'gives GQL the variables set on the connection' do
+    skip 'needs GQL' if server_older_than?('3.2.0') || (server_older_than?('3.3.0') && !gql_enabled_on_3_2?)
+
+    client.set('min', 30)
+    expect(client.gql('MATCH (p:person) WHERE p.age > $min RETURN p.name AS name')).to eq([[{ 'name' => 'Ann' }]])
+  end
+
+  # GQL on 3.2 is behind the experimental `gql` capability.
+  def gql_enabled_on_3_2?
+    client.gql('MATCH (p:person) RETURN p.name AS name')
+    true
+  rescue SurrealDB::NotAllowedError
+    false
   end
 end

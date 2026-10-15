@@ -49,3 +49,30 @@ RSpec.describe SurrealDB::Connections::WebSocket, '#deliver_response' do
     expect { frames.pop(1) }.to raise_error(SurrealDB::TimeoutError, /not read for/)
   end
 end
+
+RSpec.describe SurrealDB::Connections::WebSocket, '#execute_stream' do
+  let(:connection) { described_class.new('ws://localhost:8000', timeout: 2) }
+
+  it 'frees a reader waiting for room before asking the server to stop the stream' do
+    connection.instance_variable_set(:@connected, true)
+    reader = nil
+    allow(connection).to receive(:write_frame) do
+      id = connection.instance_variable_get(:@streams).keys.first
+      frame = SurrealDB::CBOR::Encoder.encode({ 'id' => id, 'result' => { 'stream' => 'begin' } })
+      # More frames than the buffer holds once the caller has taken one: the
+      # last push waits for room.
+      reader = Thread.new do
+        (SurrealDB::Connections::StreamFrames::CAPACITY + 2).times { connection.send(:deliver_response, id, frame) }
+      end
+      sleep 0.05
+    end
+    reader_freed = nil
+    allow(connection).to receive(:execute) { reader_freed = !reader.join(0.5).nil? }
+
+    connection.send(:execute_stream, 'query_stream', ['SELECT 1']) do
+      sleep 0.1 # meanwhile the reader fills the buffer again and waits
+      break
+    end
+    expect(reader_freed).to be(true)
+  end
+end

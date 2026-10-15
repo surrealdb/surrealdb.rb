@@ -106,6 +106,9 @@ module SurrealDB
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 
       @connection.stream_request(method, params, session: @session, txn: @id, **timeout_option(timeout), &)
+    rescue RequestInterruptedError
+      @state = :lost
+      raise
     end
   end
 end
