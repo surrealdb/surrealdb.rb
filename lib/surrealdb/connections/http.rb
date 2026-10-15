@@ -234,6 +234,7 @@ module SurrealDB
         raise TimeoutError.new('HTTP request timed out while connecting', sent: false) unless left.positive?
 
         @http.read_timeout = left
+        @http.write_timeout = left
       end
 
       def start_http

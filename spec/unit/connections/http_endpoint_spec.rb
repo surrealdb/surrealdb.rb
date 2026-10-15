@@ -46,6 +46,24 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
     reader&.kill
   end
 
+  it 'writes the request and reads the answer within the time opening the connection left' do
+    conn = instance_double(Net::HTTP)
+    timeouts = {}
+    allow(conn).to receive(:write_timeout=) { |t| timeouts[:write] = t }
+    allow(conn).to receive(:read_timeout=) { |t| timeouts[:read] = t }
+    allow(conn).to receive(:request).and_return(Net::HTTPOK.new('1.1', '200', 'OK'))
+    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil,
+                                      :write_timeout= => nil)
+    allow(http).to receive(:start) do |&block|
+      sleep 0.3 # opening the connection
+      block.call(conn)
+    end
+    allow(Net::HTTP).to receive(:new).and_return(http)
+    described_class.new('http://db.example.com', timeout: 5).request(:get, '/health', timeout: 1)
+    expect(timeouts.keys).to contain_exactly(:write, :read)
+    expect(timeouts.values).to all(be_between(0.5, 0.7))
+  end
+
   describe '.raise_for' do
     def response(code, body)
       klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)

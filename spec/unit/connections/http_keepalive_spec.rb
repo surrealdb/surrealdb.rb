@@ -98,24 +98,24 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
-  it 'reads the response within the time opening the socket left, not a fresh timeout' do
+  it 'writes the request and reads the response within the time opening the socket left' do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
     net = http.instance_variable_get(:@http)
-    read_timeout = nil
+    seen = nil
     allow(net).to receive(:connect).and_wrap_original do |original|
       sleep 0.3
       original.call
     end
     allow(net).to receive(:request).and_wrap_original do |original, *args|
-      read_timeout = net.read_timeout
+      seen = [net.read_timeout, net.write_timeout]
       original.call(*args)
     end
     Timeout.timeout(5) do
       expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
       http.send_request('ping', timeout: 1)
     end
-    expect(read_timeout).to be_between(0.4, 0.7)
+    expect(seen).to all(be_between(0.4, 0.7))
   ensure
     http&.close
     server&.close
