@@ -157,3 +157,15 @@ RSpec.describe SurrealDB::StringRecordID do
     expect { described_class.new('') }.to raise_error(ArgumentError)
   end
 end
+
+RSpec.describe 'Wrapping a name' do # rubocop:disable RSpec/DescribeClass
+  it 'leaves the caller free to change their string, and is not changed by it' do
+    name = +'person'
+    table = SurrealDB::Table.new(name)
+    rid = SurrealDB::RecordID.new(name, 'x')
+    srid = SurrealDB::StringRecordID.new(+'person:x')
+    expect(name).not_to be_frozen
+    name << '_archive'
+    expect([table.name, rid.table, srid.to_s]).to eq(%w[person person person:x])
+  end
+end
