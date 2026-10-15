@@ -339,6 +339,19 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(inner.handlers.size).to eq(1)
     end
 
+    it 'forgets the transactions of the session it reset, but not those of others' do
+      other = SurrealDB::Uuid.v4
+      reliable.send_request('begin', [])
+      allow(inner).to receive(:execute).and_wrap_original do |execute, method, *args, **options|
+        method == 'begin' ? SurrealDB::Uuid.v4 : execute.call(method, *args, **options)
+      end
+      kept = reliable.send_request('begin', [], session: other)
+      reliable.send_request('reset')
+      expect(reliable.instance_variable_get(:@transactions).keys).to eq([kept.to_s])
+      reliable.send_request('detach', [], session: other)
+      expect(reliable.instance_variable_get(:@transactions)).to be_empty
+    end
+
     it 'is repeated when it was in flight' do
       inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
       expect(reliable.send_request('reset')).to eq('ok')

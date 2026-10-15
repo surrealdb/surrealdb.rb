@@ -130,6 +130,9 @@ module SurrealDB
     # @return [void]
     def subscribe(live_query_id, &block)
       require_live_queries!
+      # An id from a LIVE SELECT statement or send_rpc is not in the list
+      # yet; {#reset} removes its handler too.
+      live_query_ids << live_query_id.to_s unless live_query_ids.include?(live_query_id.to_s)
       connection.on_notification(live_query_id.to_s, block)
     end
 

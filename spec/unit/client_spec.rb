@@ -310,6 +310,12 @@ RSpec.describe SurrealDB::Client do
       client.reset
       expect(client.connection.instance_variable_get(:@live_handlers)).to be_empty
     end
+
+    it 'removes the handlers of live queries started some other way, too' do
+      client.subscribe(SurrealDB::Uuid.v4) { nil } # an id from a LIVE SELECT statement
+      client.reset
+      expect(client.connection.instance_variable_get(:@live_handlers)).to be_empty
+    end
   end
 
   describe '#send_rpc' do
