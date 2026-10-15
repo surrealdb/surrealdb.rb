@@ -21,8 +21,9 @@ module SurrealDB
     def initialize(bucket, key)
       raise ArgumentError, 'bucket must be a non-empty string' if bucket.nil? || bucket.to_s.empty?
 
-      @bucket = bucket.to_s.freeze
-      @key = key.to_s.start_with?('/') ? key.to_s.freeze : "/#{key}".freeze
+      # Frozen copies: the caller's strings are left as they were.
+      @bucket = -bucket.to_s
+      @key = key.to_s.start_with?('/') ? -key.to_s : -"/#{key}"
     end
 
     # The file as SurrealQL writes it, for display. It is a valid literal
