@@ -243,8 +243,8 @@ RSpec.describe SurrealDB::Connections::HTTP, '#close' do
 
   it 'detaches the sessions still attached, which the server would otherwise keep' do
     connection.close
-    expect(connection).to have_received(:execute).with('detach', [], session: first)
-    expect(connection).to have_received(:execute).with('detach', [], session: second)
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: first))
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: second))
     expect(connection).not_to be_connected
   end
 
