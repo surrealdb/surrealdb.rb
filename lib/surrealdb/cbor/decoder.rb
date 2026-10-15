@@ -42,7 +42,12 @@ module SurrealDB
         when Tags::TABLE
           SurrealDB::Table.new(value)
         when Tags::RECORD_ID
-          SurrealDB::RecordID.new(value[0], resolve(value[1]))
+          # The string form ("table:id") is the one StringRecordID sends.
+          if value.is_a?(String)
+            SurrealDB::StringRecordID.new(value)
+          else
+            SurrealDB::RecordID.new(value[0], resolve(value[1]))
+          end
         when Tags::UUID_STRING, Tags::UUID_BINARY
           resolve_uuid(tag, value)
         when Tags::DECIMAL_STRING

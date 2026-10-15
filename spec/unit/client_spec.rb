@@ -66,19 +66,67 @@ RSpec.describe SurrealDB::Client do
     it 'omits data when nil' do
       allow(connection).to receive(:send_request)
       client.create('table')
-      expect(connection).to have_received(:send_request).with('create', ['table'])
+      expect(connection).to have_received(:send_request).with('create', [SurrealDB::Table.new('table')])
     end
 
     it 'includes data when present' do
       allow(connection).to receive(:send_request)
       client.create('table', { 'name' => 'Alice' })
-      expect(connection).to have_received(:send_request).with('create', ['table', { 'name' => 'Alice' }])
+      expect(connection).to have_received(:send_request)
+        .with('create', [SurrealDB::Table.new('table'), { 'name' => 'Alice' }])
     end
 
     it 'includes data even when falsy (false)' do
       allow(connection).to receive(:send_request)
       client.create('table', false)
-      expect(connection).to have_received(:send_request).with('create', ['table', false])
+      expect(connection).to have_received(:send_request).with('create', [SurrealDB::Table.new('table'), false])
+    end
+  end
+
+  describe 'record and table targets' do
+    let(:connection) { instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true) }
+    let(:client) { described_class.new('ws://localhost:8000') }
+    let(:rid) { SurrealDB::RecordID.new('person', 'alice') }
+
+    before do
+      client.instance_variable_set(:@connection, connection)
+      allow(connection).to receive(:send_request)
+    end
+
+    it 'sends a RecordID as a typed value, not a string' do
+      client.select(rid)
+      expect(connection).to have_received(:send_request).with('select', [rid])
+    end
+
+    it 'sends a StringRecordID as a typed value' do
+      srid = SurrealDB::StringRecordID.new('person:alice')
+      client.delete(srid)
+      expect(connection).to have_received(:send_request).with('delete', [srid])
+    end
+
+    it 'sends a plain string as a table' do
+      client.select('person')
+      expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('person')])
+    end
+
+    %i[select create update upsert merge patch delete].each do |method|
+      it "refuses to guess that a \"table:id\" string is a record id in ##{method}" do
+        args = %i[select delete].include?(method) ? [] : [{}]
+        expect { client.public_send(method, 'person:alice', *args) }
+          .to raise_error(ArgumentError, /RecordID\.parse/)
+        expect(connection).not_to have_received(:send_request)
+      end
+    end
+
+    it 'sends relate endpoints as typed record ids' do
+      bob = SurrealDB::RecordID.new('person', 'bob')
+      client.relate(rid, 'knows', bob)
+      expect(connection).to have_received(:send_request)
+        .with('relate', [rid, SurrealDB::Table.new('knows'), bob])
+    end
+
+    it 'refuses string relate endpoints' do
+      expect { client.relate('person:alice', 'knows', rid) }.to raise_error(ArgumentError, /RecordID/)
     end
   end
 

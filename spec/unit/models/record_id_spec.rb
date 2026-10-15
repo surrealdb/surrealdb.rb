@@ -40,6 +40,73 @@ RSpec.describe SurrealDB::RecordID do
       expect(rid.id).to eq('some-complex-id')
     end
 
+    it 'parses backtick and angle-bracket escaped tables' do
+      expect(described_class.parse('`my-table`:x')).to eq(described_class.new('my-table', 'x'))
+      expect(described_class.parse("\u27E8my table\u27E9:x")).to eq(described_class.new('my table', 'x'))
+    end
+
+    it 'parses signed numeric ids as integers' do
+      expect(described_class.parse('post:-1').id).to eq(-1)
+      expect(described_class.parse('post:+7').id).to eq(7)
+      expect(described_class.parse(described_class.new('post', -42).to_s)).to eq(described_class.new('post', -42))
+      expect(described_class.parse(described_class.new('post', '-42').to_s).id).to eq('-42')
+    end
+
+    it 'keeps ids with letters after digits as strings' do
+      expect(described_class.parse('knows:2wl3iofcyqmg6in96bga').id).to eq('2wl3iofcyqmg6in96bga')
+    end
+
+    it 'refuses complex ids it cannot parse on the client' do
+      expect { described_class.parse("temp:['London', 1]") }.to raise_error(ArgumentError, /StringRecordID/)
+    end
+
+    it 'round-trips through #to_s' do
+      ['person:alice', "person:\u27E8a-b\u27E9", 'post:42', "\u27E8a:b\u27E9:c", "x:\u27E8123\u27E9"].each do |str|
+        expect(described_class.parse(str).to_s).to eq(str)
+      end
+    end
+
+    it 'round-trips tables and ids that contain escaped characters' do
+      [
+        ["a\u27E9b", 'x'], ['t', "x\u27E9y"], ['t', 'a\\b'], ['t', "two\nlines"], ['t', "a\bb"], ["a\\\u27E9", "\u27E9"]
+      ].each do |table, id|
+        rid = described_class.new(table, id)
+        expect(described_class.parse(rid.to_s)).to eq(rid)
+      end
+    end
+
+    it 'undoes escapes the way SurrealQL writes them' do
+      expect(described_class.parse("t:\u27E8a\\\u27E9b\u27E9").id).to eq("a\u27E9b")
+      expect(described_class.parse('`a\\`b`:x').table).to eq('a`b')
+      expect(described_class.parse("t:\u27E8\\u{41}\\t\u27E9").id).to eq("A\t")
+      expect(described_class.parse("t:\u27E8a\\bb\u27E9").id).to eq("a\bb")
+      expect(described_class.parse("t:\u27E8\\u0041\\u27e9\u27E9").id).to eq("A\u27E9")
+      expect(described_class.parse('t:`a\\\'b\\"c`').id).to eq('a\'b"c')
+      expect(described_class.new('t', "a\bb").to_s).to eq("t:\u27E8a\\u{8}b\u27E9")
+    end
+
+    it 'rejects an escape SurrealQL does not have, rather than dropping the backslash' do
+      ["t:\u27E8a\\qb\u27E9", 't:`a\\qb`', "t:\u27E8\\u41\u27E9", "t:\u27E8\\uD83D\u27E9"].each do |str|
+        expect { described_class.parse(str) }.to raise_error(ArgumentError, /escape/)
+      end
+    end
+
+    it 'writes a closing bracket in an identifier as a unicode escape, which SurrealDB 3 reads' do
+      expect(described_class.new('t', "a\u27E9b").to_s).to eq("t:\u27E8a\\u{27e9}b\u27E9")
+    end
+
+    it 'rejects a unicode escape that does not name a character' do
+      ['\\u{zz}', '\\u{}', '\\u{D800}', '\\u{110000}', '\\u{0000041}', '\\u{41'].each do |escape|
+        expect { described_class.parse("t:\u27E8#{escape}\u27E9") }.to raise_error(ArgumentError, /unicode escape/)
+      end
+    end
+
+    it 'rejects unterminated or trailing escaped ids' do
+      expect { described_class.parse("t:\u27E8abc") }.to raise_error(ArgumentError)
+      expect { described_class.parse("t:\u27E8a\u27E9b") }.to raise_error(ArgumentError)
+      expect { described_class.parse("\u27E8t\\\u27E9:x") }.to raise_error(ArgumentError)
+    end
+
     it 'rejects strings without colon' do
       expect { described_class.parse('invalid') }.to raise_error(ArgumentError)
     end
@@ -65,7 +132,15 @@ RSpec.describe SurrealDB::RecordID do
 
     it 'formats array ids' do
       rid = described_class.new('test', [1, 'two'])
-      expect(rid.to_s).to eq('test:[1, two]')
+      expect(rid.to_s).to eq('test:[1, "two"]')
+    end
+
+    it 'escapes table names that are not identifiers' do
+      expect(described_class.new('person:alice', 'x').to_s).to eq("\u27E8person:alice\u27E9:x")
+    end
+
+    it 'escapes string ids made only of digits so they do not read as numbers' do
+      expect(described_class.new('post', '42').to_s).to eq("post:\u27E842\u27E9")
     end
   end
 
@@ -82,5 +157,29 @@ RSpec.describe SurrealDB::RecordID do
       b = described_class.new('user', 'jane')
       expect(a).not_to eq(b)
     end
+  end
+end
+
+RSpec.describe SurrealDB::StringRecordID do
+  it 'is encoded as CBOR tag 8 carrying the string' do
+    tagged = SurrealDB::CBOR::Encoder.prepare(described_class.new('person:alice'))
+    expect(tagged.tag).to eq(SurrealDB::CBOR::Tags::RECORD_ID)
+    expect(tagged.value).to eq('person:alice')
+  end
+
+  it 'rejects empty strings' do
+    expect { described_class.new('') }.to raise_error(ArgumentError)
+  end
+end
+
+RSpec.describe 'Wrapping a name' do # rubocop:disable RSpec/DescribeClass
+  it 'leaves the caller free to change their string, and is not changed by it' do
+    name = +'person'
+    table = SurrealDB::Table.new(name)
+    rid = SurrealDB::RecordID.new(name, 'x')
+    srid = SurrealDB::StringRecordID.new(+'person:x')
+    expect(name).not_to be_frozen
+    name << '_archive'
+    expect([table.name, rid.table, srid.to_s]).to eq(%w[person person person:x])
   end
 end
