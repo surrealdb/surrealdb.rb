@@ -5,6 +5,15 @@ module SurrealDB
     # Abstract base class for SurrealDB transport connections.
     # Subclasses must implement #connect, #close, and #execute.
     class Base
+      # Requests that must not trigger a token renewal: they authenticate the
+      # session themselves, or do not need it.
+      NO_RENEWAL = [
+        Protocol::Methods::SIGNIN, Protocol::Methods::SIGNUP, Protocol::Methods::AUTHENTICATE,
+        Protocol::Methods::INVALIDATE, Protocol::Methods::REFRESH, Protocol::Methods::REVOKE,
+        Protocol::Methods::RESET, Protocol::Methods::ATTACH, Protocol::Methods::DETACH,
+        Protocol::Methods::PING, Protocol::Methods::VERSION
+      ].freeze
+
       # @return [String] base URL
       attr_reader :url
 
@@ -18,6 +27,9 @@ module SurrealDB
         @connected = false
         @state_mutex = Mutex.new
         @session_states = { nil => SessionState.new }
+        @renew_tokens = options.fetch(:renew_tokens, true)
+        @token_refresh_margin = options.fetch(:token_refresh_margin, 60)
+        @renew_mutex = Mutex.new
       end
 
       # Opens the transport connection.
@@ -39,6 +51,7 @@ module SurrealDB
       # @param txn [Uuid, nil] transaction to run the request in
       # @return [Object] decoded result
       def send_request(method, params = [], session: nil, txn: nil)
+        renew_before(method, session) unless NO_RENEWAL.include?(method)
         result = execute(method, params, session: session, txn: txn)
         track_request(method, params, result, session)
         result
@@ -74,6 +87,22 @@ module SurrealDB
         @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
       end
 
+      # Sends a request to one of the server's HTTP routes (/import, /export)
+      # with a session's namespace, database and credentials, renewing its
+      # access token first as {#send_request} does. Like RPC requests, it is
+      # refused once the connection, or the session, has been closed.
+      # @param session [Uuid, nil]
+      # @return [Net::HTTPResponse]
+      # @raise [NotConnectedError] if the connection is not open
+      # @raise [SessionError] if the session has been detached
+      def http_request(verb, path, session: nil, **, &)
+        raise NotConnectedError, 'not connected' unless @connected
+        raise SessionError, "session #{session} is closed" if session && session_state(session).nil?
+
+        renew_before(path, session)
+        http_endpoint.request(verb, path, state: session_state(session), **, &)
+      end
+
       # Asks the server's HTTP /health route whether it is up and its storage
       # is reachable.
       # @return [void]
@@ -83,21 +112,6 @@ module SurrealDB
         response = http_endpoint.request(:get, '/health')
         HTTPEndpoint.raise_for(response, 'health check') unless response.is_a?(Net::HTTPSuccess)
         nil
-      end
-
-      # Sends a request to one of the server's HTTP routes (/import, /export)
-      # with a session's namespace, database and credentials. Like RPC
-      # requests, it is refused once the connection, or the session, has been
-      # closed.
-      # @param session [Uuid, nil]
-      # @return [Net::HTTPResponse]
-      # @raise [ConnectionError] if the connection is not open
-      # @raise [SessionError] if the session has been detached
-      def http_request(verb, path, session: nil, **, &)
-        raise ConnectionError, 'not connected' unless @connected
-        raise SessionError, "session #{session} is closed" if session && session_state(session).nil?
-
-        http_endpoint.request(verb, path, state: session_state(session), **, &)
       end
 
       # Whether the server answers `sessions` (listing attached sessions) on
@@ -139,6 +153,58 @@ module SurrealDB
           else
             @session_states[session]&.track(method, params, result)
           end
+        end
+      end
+
+      # Renews a session's access token shortly before it expires, so the
+      # session does not silently lose its credentials: with the refresh
+      # token when there is one, otherwise by signing in again with the
+      # credentials it last signed in with. Losing the connection while
+      # renewing means the request itself was never sent, so it is reported
+      # as NotConnectedError, which is safe to retry, rather than as an error
+      # from the request.
+      def renew_before(request, session)
+        return unless @renew_tokens
+
+        renew_tokens(request, session)
+      rescue NotConnectedError
+        raise
+      rescue ConnectionError => e
+        raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
+                                 "'#{request}' was not sent"
+      end
+
+      # A token that cannot be renewed (there is nothing to renew it with, or
+      # the server refused) is still used until it expires; after that the
+      # request is refused, as the server would run it signed out.
+      def renew_tokens(request, session)
+        state = session_state(session)
+        return unless state&.expiring?(@token_refresh_margin)
+        return refuse_expired(request, state, 'no refresh token or sign-in to repeat') unless state.renewable?
+
+        @renew_mutex.synchronize do
+          next unless state.expiring?(@token_refresh_margin) # another thread renewed it
+
+          log(:debug, 'Access token expiring; renewing it')
+          renew_with(state, session)
+        end
+      rescue ServerError => e
+        log(:warn, "Could not renew the access token: #{e.message}")
+        refuse_expired(request, state, e.message)
+      end
+
+      def refuse_expired(request, state, reason)
+        return unless state.expired?
+
+        raise AuthenticationError, "the access token has expired and could not be renewed (#{reason}); " \
+                                   "'#{request}' was not sent"
+      end
+
+      def renew_with(state, session)
+        if state.refresh_token
+          send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
+        else
+          send_request(*state.signin, session: session)
         end
       end
 

@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- `authenticate` with a different token kept the previous identity's refresh token and
+  sign-in credentials.
+- Over HTTP, `signin`, `signup`, `authenticate`, `refresh` and `revoke` sent the current
+  access token as a bearer header, so once it had expired the server refused them with 401.
 - Clearing the namespace or database with `use` left the SDK holding a `NONE` value, which
   HTTP connections then sent as the namespace or database header.
 - README examples that did not run: the Queries example selected from a table before
@@ -58,6 +62,15 @@
   reconnect starts as soon as the drop is noticed.
 
 ### Added
+
+- `refresh` and `revoke` for access methods defined `WITH REFRESH`; `authenticate` also
+  accepts the `{"access", "refresh"}` pair `signin`/`signup` return.
+- Automatic token renewal: shortly before a session's access token expires (read from its
+  `exp` claim), the SDK renews it with the refresh token, or by signing in again with the
+  last `signin` credentials. Previously an expired token left a WebSocket session running
+  unauthenticated and made HTTP requests fail. Configure with `token_refresh_margin:`
+  (default 60s, capped at a quarter of the token's lifetime) or turn off with
+  `renew_tokens: false`. Reconnection also falls back to the refresh token.
 
 - `use` changes the namespace or the database alone and can clear either: a String selects
   it, `nil` clears it and `SurrealDB::NONE` (the default) leaves it unchanged, positionally

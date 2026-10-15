@@ -32,20 +32,29 @@ module SurrealDB
       end
 
       # Re-presents the token; when the server no longer accepts it (it
-      # expired while we were away), signs in again with the credentials the
-      # session last signed in with. A signup is never repeated. A session
-      # that cannot authenticate again is left signed out, and the rest of
-      # its state is still restored.
+      # expired while we were away), uses the refresh token, or signs in again
+      # with the credentials the session last signed in with. A signup is
+      # never repeated. A session that cannot authenticate again is left
+      # signed out, and the rest of its state is still restored.
       def restore_auth(id, state)
         return unless state.access_token
 
         @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
       rescue ServerError => e
-        state.signin ? sign_in_again(id, state, e) : drop_auth(id, e)
+        return drop_auth(id, e) unless state.renewable?
+
+        log(:info, "Stored token rejected after reconnect (#{e.message}); renewing it")
+        renew_auth(id, state)
       end
 
-      def sign_in_again(id, state, error)
-        log(:info, "Stored token rejected after reconnect (#{error.message}); signing in again")
+      def renew_auth(id, state)
+        if state.refresh_token
+          begin
+            return @inner.send_request(Protocol::Methods::REFRESH, [state.tokens], session: id)
+          rescue ServerError => e
+            return drop_auth(id, e) unless state.signin
+          end
+        end
         @inner.send_request(*state.signin, session: id)
       rescue ServerError => e
         drop_auth(id, e)
@@ -54,6 +63,7 @@ module SurrealDB
       # Forgets the credentials, so the session state says what the server
       # now has: an unauthenticated session.
       def drop_auth(id, error)
+        @state_mutex.synchronize { @auth_lost[id] = @generation }
         log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
                    "reconnecting (#{error.message}); it is now signed out")
         @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)

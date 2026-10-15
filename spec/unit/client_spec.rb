@@ -442,6 +442,34 @@ RSpec.describe SurrealDB::Client, '#import' do
   end
 end
 
+RSpec.describe SurrealDB::Client, '#fork_session' do
+  let(:connection) do
+    Class.new(SurrealDB::Connections::Base) do
+      def initialize(url)
+        super
+        @connected = true
+      end
+
+      protected
+
+      def execute(method, *, **)
+        { 'access' => 'a1', 'refresh' => 'r1' } if method == 'signin'
+      end
+    end.new('ws://localhost:8000')
+  end
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before { client.instance_variable_set(:@connection, connection) }
+
+  it 'gives the fork what it needs to renew its token: the refresh token and the sign-in' do
+    client.signin({ 'user' => 'u', 'pass' => 'p' })
+    fork = client.fork_session
+    state = connection.session_state(fork.id)
+    expect(state.tokens).to eq({ 'access' => 'a1', 'refresh' => 'r1' })
+    expect(state.signin).to eq(['signin', [{ 'user' => 'u', 'pass' => 'p' }]])
+  end
+end
+
 RSpec.describe SurrealDB::Connections::HTTP, '#close' do
   let(:connection) { described_class.new('http://localhost:8000') }
   let(:first) { SurrealDB::Uuid.v4 }

@@ -56,6 +56,9 @@ module SurrealDB
         # Transactions, by id: [connection generation they began on, session].
         @generation = 0
         @transactions = {}
+        # Sessions whose credentials could not be restored, by the generation
+        # that lost them.
+        @auth_lost = {}
         # Requests between sending and recording their result.
         @delivering = 0
         @delivered = ConditionVariable.new
@@ -95,6 +98,22 @@ module SurrealDB
         @inner.http_endpoint
       end
 
+      # The request goes over HTTP, but renewing the session's token first
+      # needs the WebSocket, so it waits for a reconnect like {#send_request}.
+      def http_request(verb, path, session: nil, **, &)
+        since = generation_seen
+        await_restore
+        ensure_connected!
+        check_auth_kept(path, session, since)
+        begin
+          @inner.http_request(verb, path, session: session, **, &)
+        rescue NotConnectedError # renewing the token; the request was not sent
+          ensure_connected!
+          check_auth_kept(path, session, since)
+          @inner.http_request(verb, path, session: session, **, &)
+        end
+      end
+
       def health
         @inner.health
       end
@@ -108,8 +127,9 @@ module SurrealDB
       end
 
       def send_request(method, params = [], session: nil, txn: nil)
+        since = generation_seen
         await_restore
-        deliver(method, params, session, txn)
+        deliver(method, params, session, txn, since)
       rescue RequestInterruptedError
         # Ending a lost transaction ends our record of it too.
         @state_mutex.synchronize { @transactions.delete(params[0].to_s) } if TXN_FINISH.include?(method)
@@ -141,15 +161,19 @@ module SurrealDB
       # Sends a request, reconnecting when the connection is gone: a request
       # that never left is sent on the new connection, one that was in flight
       # only when repeating it is harmless.
-      def deliver(method, params, session, txn)
+      # Neither is sent when a reconnect since the request was made left its
+      # session signed out.
+      def deliver(method, params, session, txn, since)
         transaction = txn || (params[0] if TXN_FINISH.include?(method))
         check_transaction_alive(transaction)
+        check_auth_kept(method, session, since)
         attempt(method, params, session, txn)
       rescue NotConnectedError
         ensure_connected!
         check_transaction_alive(transaction)
+        check_auth_kept(method, session, since)
         attempt(method, params, session, txn)
-      rescue RequestInterruptedError
+      rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
         return ended_with_connection(method, params, session) if ends_with_connection?(method, session)
@@ -157,7 +181,28 @@ module SurrealDB
         ensure_connected!
         raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
 
+        check_auth_kept(method, session, since)
         attempt(method, params, session, txn)
+      end
+
+      # The connection generation a new request belongs to. A request made
+      # during a restore belongs to the one before: it was made expecting the
+      # state the restore is bringing back.
+      def generation_seen
+        generation = @generation
+        @restoring ? generation - 1 : generation
+      end
+
+      # Signing in, out or again needs no previous identity.
+      def check_auth_kept(request, session, since)
+        return if Base::NO_RENEWAL.include?(request)
+
+        lost = @state_mutex.synchronize { @auth_lost[session] }
+        return if lost.nil? || lost <= since
+
+        raise AuthenticationError,
+              "#{session ? "session #{session}" : 'the default session'} could not authenticate again after " \
+              "the connection was lost, so it is signed out; '#{request}' was not sent"
       end
 
       # Sends one request, translating live query ids the caller holds into
