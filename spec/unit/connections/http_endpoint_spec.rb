@@ -19,7 +19,8 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
   end
 
   it 'opens HTTPS endpoints with TLS on port 443' do
-    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil)
+    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil,
+                                      :write_timeout= => nil)
     allow(Net::HTTP).to receive(:new).and_return(http)
     allow(http).to receive(:start).and_raise(Errno::ECONNREFUSED)
     endpoint = described_class.new('wss://db.example.com/rpc', timeout: 1)

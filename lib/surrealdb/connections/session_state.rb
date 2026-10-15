@@ -49,11 +49,11 @@ module SurrealDB
         case method
         when Protocol::Methods::USE then track_use(params, result)
         when Protocol::Methods::SIGNIN
-          @signin = [method, params]
-          store_tokens(result)
+          @signin = [method, snapshot(params)]
+          signed_in(params[0], result)
         when Protocol::Methods::SIGNUP
           @signin = nil # a new identity; the previous credentials are not its own
-          store_tokens(result)
+          signed_in(params[0], result)
         when Protocol::Methods::REFRESH then refreshed(params[0], result)
         when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
         when Protocol::Methods::REVOKE then forget_revoked(params[0])
@@ -115,8 +115,8 @@ module SurrealDB
         !@refresh_token.nil? || !@signin.nil?
       end
 
-      # The claims of a JWT, decoded but not verified: they only decide when
-      # to ask the server for a new token.
+      # The claims of a JWT, decoded but not verified: the SDK only reads
+      # them to follow what the server does with the token.
       # @param token [String, nil]
       # @return [Hash, nil] nil for a token that is not a JWT
       def self.token_claims(token)
@@ -194,6 +194,21 @@ module SurrealDB
         value
       end
 
+      # Signing in or up at namespace or database level also selects that
+      # namespace (and database) on the server, as `use` would; the rest of
+      # the selection is left as it was.
+      def signed_in(credentials, result)
+        store_tokens(result)
+        select_scope(credentials.is_a?(Hash) ? credentials.transform_keys(&:to_s) : {})
+      end
+
+      def select_scope(source)
+        namespace = source['NS'] || source['ns']
+        database = source['DB'] || source['db']
+        @namespace = namespace if namespace.is_a?(String)
+        @database = database if database.is_a?(String)
+      end
+
       def store_tokens(result)
         case result
         when String
@@ -205,9 +220,6 @@ module SurrealDB
         end
       end
 
-      # Re-presenting the current token (as a reconnect does) changes
-      # nothing; a different token is a different identity, so the refresh
-      # token and sign-in credentials of the previous one are dropped.
       # Refreshing another identity's token pair switches to that identity,
       # whose sign-in credentials are not the ones kept.
       def refreshed(tokens, result)
@@ -215,11 +227,16 @@ module SurrealDB
         store_tokens(result)
       end
 
+      # Re-presenting the current token (as a reconnect does) changes
+      # nothing; a different token is a different identity, so the refresh
+      # token and sign-in credentials of the previous one are dropped, and
+      # the scope the token names is selected.
       def authenticated_with(token)
         return if token == @access_token
 
         store_tokens(token)
         @signin = nil
+        select_scope(self.class.token_claims(token) || {})
       end
 
       def forget_revoked(tokens)

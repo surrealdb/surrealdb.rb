@@ -34,6 +34,7 @@ module SurrealDB
         @http.use_ssl = (uri.scheme == 'https')
         @http.open_timeout = @timeout
         @http.read_timeout = @timeout
+        @http.write_timeout = @timeout
 
         @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
 
@@ -134,12 +135,14 @@ module SurrealDB
         @call_deadline = monotonic_now + timeout
         @http.open_timeout = timeout
         @http.read_timeout = timeout
+        @http.write_timeout = timeout
         begin
           yield
         ensure
           @call_deadline = nil
           @http.open_timeout = @timeout
           @http.read_timeout = @timeout
+          @http.write_timeout = @timeout
         end
       end
 
@@ -177,12 +180,16 @@ module SurrealDB
 
         log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
         transport(request, repeatable: true, retried: true)
-      rescue Net::OpenTimeout, Net::ReadTimeout => e
+      rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout => e
         drop_socket
-        raise TimeoutError, "HTTP request timed out: #{e.message}"
+        # The server runs a request only once it has the whole body.
+        raise TimeoutError.new("HTTP request timed out: #{e.message}", sent: e.is_a?(Net::ReadTimeout))
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
         drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+      rescue Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => e
+        drop_socket
+        raise ProtocolError, "HTTP got a malformed response: #{e.message}"
       end
 
       # Opening a socket sends nothing, so a failure here means the request
@@ -193,7 +200,7 @@ module SurrealDB
         start_http
         read_within_deadline
       rescue Net::OpenTimeout => e
-        raise TimeoutError, "HTTP connect timed out: #{e.message}"
+        raise TimeoutError.new("HTTP connect timed out: #{e.message}", sent: false)
       rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
         raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
       end
@@ -202,7 +209,7 @@ module SurrealDB
         return unless @call_deadline
 
         left = @call_deadline - monotonic_now
-        raise TimeoutError, 'HTTP request timed out while connecting' unless left.positive?
+        raise TimeoutError.new('HTTP request timed out while connecting', sent: false) unless left.positive?
 
         @http.read_timeout = left
       end

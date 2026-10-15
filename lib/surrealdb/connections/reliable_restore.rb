@@ -8,6 +8,27 @@ module SurrealDB
     module ReliableRestore
       private
 
+      # Brings the state the server lost back on the new connection. Its
+      # transactions are gone, so they belong to the previous generation.
+      def restore_state
+        @restoring = true
+        @generation += 1
+        restore_sessions
+        restore_live_queries
+      ensure
+        @restoring = false
+      end
+
+      # Runs the check registered with {ReliableWebSocket#on_reconnect}; a
+      # connection that fails it is closed again.
+      def check_new_connection
+        @on_reconnect&.call(@inner)
+      rescue StandardError
+        @inner.close
+        @connected = false
+        raise
+      end
+
       # One session failing to restore does not stop the others.
       def restore_sessions
         begin

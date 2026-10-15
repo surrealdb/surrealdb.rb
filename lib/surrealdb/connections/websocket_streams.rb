@@ -59,11 +59,12 @@ module SurrealDB
         frames = StreamFrames.new
         @mutex.synchronize { @streams[id] = frames }
         done = false
+        timeout ||= @timeout
         begin
-          write_frame(encoded)
+          write_frame(encoded, monotonic_now + timeout, method)
           until done
             begin
-              result = next_stream_frame(frames, timeout || @timeout)
+              result = next_stream_frame(frames, timeout)
             rescue ServerError
               done = true # the server answered with an error: there is no stream to stop
               raise
