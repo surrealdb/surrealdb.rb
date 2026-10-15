@@ -301,6 +301,18 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(methods_sent).not_to include('live')
     end
 
+    it 'removes the handlers of the live queries it killed, also after a reconnect' do
+      original = reliable.send_request('live', ['person'])
+      other = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: other)
+      kept = reliable.send_request('live', ['person'], session: other)
+      [original, kept].each { |id| reliable.on_notification(id, proc {}) }
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version') # reconnects; the live queries get new ids
+      reliable.send_request('reset')
+      expect(inner.handlers.size).to eq(1)
+    end
+
     it 'is repeated when it was in flight' do
       inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
       expect(reliable.send_request('reset')).to eq('ok')

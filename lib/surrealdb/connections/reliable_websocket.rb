@@ -163,9 +163,18 @@ module SurrealDB
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
-        when Protocol::Methods::RESET # the server killed the session's live queries
-          @state_mutex.synchronize { @lives.delete_if { |_, live| live[:session] == session } }
+        when Protocol::Methods::RESET then forget_lives(session)
         end
+      end
+
+      # The server killed the session's live queries; drop them and their
+      # handlers, which would otherwise never run again but stay reachable.
+      def forget_lives(session)
+        gone = @state_mutex.synchronize do
+          keys = @lives.select { |_, live| live[:session] == session }.keys
+          keys.map { |key| @lives.delete(key) }
+        end
+        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       def track_transaction(method, params, result)

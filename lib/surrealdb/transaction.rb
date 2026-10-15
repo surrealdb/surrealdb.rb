@@ -79,6 +79,11 @@ module SurrealDB
       nil
     end
 
+    # The server cancelled the transaction (the session was reset).
+    def discard
+      @state = :cancelled if open?
+    end
+
     def rpc(method, params = [])
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 

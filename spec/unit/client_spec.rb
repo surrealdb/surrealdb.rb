@@ -265,6 +265,32 @@ RSpec.describe SurrealDB::Client do
         .with('select', [SurrealDB::Table.new('person')], session: session.id, txn: txn_id)
       expect(connection).to have_received(:send_request).with('commit', [txn_id], session: session.id)
     end
+
+    it 'marks open transactions cancelled when the session is reset' do
+      open = client.begin_transaction
+      done = client.begin_transaction
+      done.commit
+      client.reset
+      expect(open).to be_cancelled
+      expect(done).to be_committed
+      expect { open.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError)
+    end
+  end
+
+  describe '#reset' do
+    let(:client) { described_class.new('ws://localhost:8000', reconnect: false) }
+    let(:live_id) { SurrealDB::Uuid.v4 }
+
+    before do
+      allow(client.connection).to receive(:send_request).and_return(nil)
+      allow(client.connection).to receive(:send_request).with('live', anything).and_return(live_id)
+    end
+
+    it 'removes the handlers of the live queries the server killed' do
+      client.subscribe(client.live('person')) { nil }
+      client.reset
+      expect(client.connection.instance_variable_get(:@live_handlers)).to be_empty
+    end
   end
 
   describe '#send_rpc' do
