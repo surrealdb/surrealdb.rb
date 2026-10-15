@@ -175,10 +175,15 @@ module SurrealDB
       nil
     end
 
+    # The fork gets the credentials to renew its token as well as the token:
+    # the refresh token, and what the original last signed in with.
     def restore_state(session, state)
       session.use(state.namespace, state.database) if state.namespace || state.database
       state.variables.each { |key, value| session.set(key, value) }
-      session.authenticate(state.access_token) if state.access_token
+      return unless state.access_token
+
+      session.authenticate(state.tokens)
+      @connection.session_state(session.id)&.signin = state.signin
     end
 
     def with_session(session)

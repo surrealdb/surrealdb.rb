@@ -64,6 +64,15 @@ RSpec.describe SurrealDB::Connections::SessionState do
       expect(state.signin).to eq(['signin', [{ 'user' => 'u' }]])
     end
 
+    it 'drops the previous sign-in credentials when refreshing another token pair' do
+      state.track('signin', [{ 'user' => 'u' }], pair)
+      state.track('refresh', [pair], { 'access' => 'a2', 'refresh' => 'r2' })
+      expect(state.signin).to eq(['signin', [{ 'user' => 'u' }]]) # its own pair
+      state.track('refresh', [{ 'access' => 'bob', 'refresh' => 'rb' }], { 'access' => 'b2', 'refresh' => 'rb2' })
+      expect(state.signin).to be_nil
+      expect(state.tokens).to eq({ 'access' => 'b2', 'refresh' => 'rb2' })
+    end
+
     it 'drops the previous sign-in credentials on signup' do
       state.track('signin', [{ 'user' => 'u' }], pair)
       state.track('signup', [{ 'ac' => 'user' }], 'other-token')
@@ -89,5 +98,14 @@ RSpec.describe SurrealDB::Connections::SessionState do
     value['extra'] = true
     expect(state.variables['v']).to eq({ 'tags' => ['a'], 'name' => 'x' })
     expect(state.copy.variables['v']).to eq({ 'tags' => ['a'], 'name' => 'x' })
+  end
+
+  it 'keeps a Set variable as it was set, too' do
+    value = Set[['a'], ['b']]
+    state = described_class.new
+    state.track('set', ['v', value], nil)
+    value << ['c']
+    value.first << 'x'
+    expect(state.variables['v'].to_a).to eq([['a'], ['b']])
   end
 end
