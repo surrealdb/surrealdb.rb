@@ -499,6 +499,13 @@ rescue SurrealDB::TimeoutError => e
 end
 ```
 
+## Server Versions
+
+The SDK supports SurrealDB 3.0.0 up to (not including) 5.0.0. `connect` checks the
+server's version and raises `SurrealDB::UnsupportedVersionError` outside that range;
+pass `version_check: false` to connect anyway. `client.server_version` holds what the
+server reported.
+
 ## Configuration
 
 ```ruby

@@ -401,6 +401,49 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe '#on_reconnect' do
+    it 'checks each new connection before restoring anything on it' do
+      reliable.send_request('use', %w[ns db])
+      checked = []
+      reliable.on_reconnect { |connection| checked << connection.send_request('version') }
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('select', ['person'])
+      expect(checked).to eq(['ok'])
+      expect(methods_sent).to eq(%w[select version use select])
+    end
+
+    it 'holds other requests back until the new connection has passed the check' do
+      reliable
+      other = nil
+      reliable.on_reconnect do
+        other ||= Thread.new do
+          reliable.send_request('select', ['person'])
+        rescue SurrealDB::Error
+          nil
+        end
+        sleep 0.1 # the other request arrives while the check runs
+        inner.calls << ['checked']
+        raise SurrealDB::UnsupportedVersionError.new('surrealdb-5.0.0', '3.0.0', '5.0.0')
+      end
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect { reliable.send_request('version') }.to raise_error(SurrealDB::UnsupportedVersionError)
+      other.join
+      expect(methods_sent.index('select')).to be_nil.or be > methods_sent.index('checked')
+    end
+
+    it 'closes a connection that fails the check and restores nothing on it' do
+      reliable.send_request('use', %w[ns db])
+      reliable.on_reconnect { raise SurrealDB::UnsupportedVersionError.new('surrealdb-5.0.0', '3.0.0', '5.0.0') }
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect { reliable.send_request('select', ['person']) }.to raise_error(SurrealDB::UnsupportedVersionError)
+      expect(methods_sent).to eq(%w[select])
+      expect(inner).not_to be_connected
+    end
+  end
+
   describe 'a handler registered while a reconnect restores its live query' do
     it 'receives the notifications of the restored query' do
       original = reliable.send_request('live', ['person'])

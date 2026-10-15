@@ -386,8 +386,7 @@ RSpec.describe SurrealDB::Client, '#healthy?' do
     client = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 2)
     expect(client.healthy?).to be(false)
     expect { client.health }.to raise_error(SurrealDB::ProtocolError, /malformed/)
-    client.connect
-    expect { client.version }.to raise_error(SurrealDB::ProtocolError, /malformed/)
+    expect { client.connect }.to raise_error(SurrealDB::ProtocolError, /malformed/) # the version check
   ensure
     server&.close
     answering&.kill

@@ -190,6 +190,11 @@ RSpec.shared_examples 'auth operations' do
     expect(client.version).to match(/\Asurrealdb-\d+\.\d+\.\d+/)
   end
 
+  it 'checked the server version on connect' do
+    expect(client.server_version).to eq(client.version)
+    expect(SurrealDB::ServerVersion.supported?(client.server_version)).to be(true)
+  end
+
   it 'can invalidate and re-signin' do
     client.invalidate
     expect { client.query('INFO FOR DB') }.to raise_error(SurrealDB::NotAllowedError)

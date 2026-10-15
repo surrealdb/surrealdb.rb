@@ -59,6 +59,7 @@ module SurrealDB
         # Sessions whose credentials could not be restored, by the generation
         # that lost them.
         @auth_lost = {}
+        @on_reconnect = nil
         # Requests between sending and recording their result.
         @delivering = 0
         @delivered = ConditionVariable.new
@@ -75,8 +76,20 @@ module SurrealDB
           reopened = @opened
           @opened = true
           @connected = true
-          restore_state if reopened
+          if reopened
+            check_new_connection
+            restore_state
+          end
         end
+      end
+
+      # Registers a check run on each new connection before anything is
+      # restored on it, such as the client's server version check. When it
+      # raises, the connection is closed again and the error reaches the
+      # request that was waiting for the reconnect.
+      # @yield [WebSocket] the new connection, to send the check on
+      def on_reconnect(&block)
+        @on_reconnect = block
       end
 
       def close
@@ -356,7 +369,7 @@ module SurrealDB
 
         log(:warn, "WebSocket connection lost (#{reason}); reconnecting")
         ensure_connected!
-      rescue ConnectionError => e
+      rescue Error => e
         log(@closed ? :debug : :error, "Reconnection failed: #{e.message}")
       end
 
@@ -367,22 +380,18 @@ module SurrealDB
           return if @inner.connected?
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
-          reconnect!
-          restore_state
+          # Requests wait (see #await_restore) until the new connection is
+          # checked and restored, not only while it is being restored.
+          @restoring = true
+          begin
+            reconnect!
+            check_new_connection
+            restore_state
+          ensure
+            @restoring = false
+          end
           log(:info, 'Reconnected')
         end
-      end
-
-      # Brings the state the server lost back on the new connection. Its
-      # transactions are gone, so they belong to the previous generation.
-      def restore_state
-        @restoring = true
-        await_deliveries
-        @generation += 1
-        restore_sessions
-        restore_live_queries
-      ensure
-        @restoring = false
       end
 
       # A request made while a reconnect is restoring sessions would reach a

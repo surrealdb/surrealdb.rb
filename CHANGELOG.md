@@ -63,6 +63,10 @@
 
 ### Added
 
+- `connect` checks the server version and raises `UnsupportedVersionError` unless it is
+  at least 3.0.0 and below 5.0.0 (`version_check: false` skips the check);
+  `Client#server_version` holds the reported version.
+
 - `refresh` and `revoke` for access methods defined `WITH REFRESH`; `authenticate` also
   accepts the `{"access", "refresh"}` pair `signin`/`signup` return.
 - Automatic token renewal: shortly before a session's access token expires (read from its

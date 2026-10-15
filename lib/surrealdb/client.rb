@@ -21,6 +21,9 @@ module SurrealDB
     # @return [Connections::Base]
     attr_reader :connection
 
+    # @return [String, nil] the server's version, as it reported it on connect
+    attr_reader :server_version
+
     # @param url [String] connection URL (ws://, wss://, http://, https://)
     # @param options [Hash] connection options
     # @option options [Numeric] :timeout response timeout in seconds
@@ -28,16 +31,33 @@ module SurrealDB
     # @option options [Boolean] :reconnect reconnect WebSocket connections automatically (default true)
     # @option options [Integer] :reconnect_max_retries reconnection attempts before giving up (default 5)
     # @option options [Numeric] :reconnect_delay base backoff delay in seconds (default 1.0)
+    # @option options [Boolean] :version_check refuse servers outside {ServerVersion} (default true)
+    # @option options [Boolean] :renew_tokens renew access tokens before they expire (default true)
+    # @option options [Numeric] :token_refresh_margin seconds before expiry to renew (default 60)
     def initialize(url, **options)
       @url = url
       @options = options
+      @version_check = options.fetch(:version_check, true)
+      @server_version = nil
       @connection = build_connection(url, **options)
+      # A reconnect may reach another server (a rolling upgrade, a failover).
+      @connection.on_reconnect { |fresh| check_server_version(fresh) } if @connection.respond_to?(:on_reconnect)
     end
 
-    # Opens the connection to SurrealDB.
+    # Opens the connection to SurrealDB and checks the server's version.
     # @return [self]
+    # @raise [UnsupportedVersionError] when the server's version is not supported
+    #   (the connection is closed again)
     def connect
       @connection.connect
+      begin
+        check_server_version
+      rescue StandardError
+        # Whatever went wrong, the caller gets no usable client back, so the
+        # transport must not be left open.
+        close_quietly
+        raise
+      end
       self
     end
 
@@ -153,6 +173,19 @@ module SurrealDB
     end
 
     private
+
+    # Asks the server for its version, on the given connection (a reconnect
+    # checks the new one before anything is restored on it).
+    def check_server_version(connection = @connection)
+      @server_version = connection.send_request(Protocol::Methods::VERSION).to_s
+      ServerVersion.check!(@server_version) if @version_check
+    end
+
+    def close_quietly
+      @connection.close
+    rescue StandardError => e
+      SurrealDB.configuration.logger&.debug("Closing after a failed connect also failed: #{e.message}")
+    end
 
     # Requests made directly on the client run in the connection's default
     # session.

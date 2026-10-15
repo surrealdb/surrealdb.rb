@@ -31,6 +31,27 @@ module SurrealDB
   # without the identity the caller expects.
   class AuthenticationError < Error; end
 
+  # Raised by {Client#connect} when the server's version is outside the
+  # range this SDK supports (see {ServerVersion}).
+  class UnsupportedVersionError < Error
+    # @return [String] the version the server reported
+    attr_reader :version
+
+    # @return [String] the oldest supported version
+    attr_reader :minimum
+
+    # @return [String] the first unsupported version
+    attr_reader :maximum
+
+    def initialize(version, minimum, maximum)
+      @version = version
+      @minimum = minimum
+      @maximum = maximum
+      super("SurrealDB server version #{version} is not supported: this SDK supports #{minimum} " \
+            "up to (not including) #{maximum}. Pass version_check: false to connect anyway.")
+    end
+  end
+
   # Base class for errors returned by the SurrealDB server.
   # Supports both legacy (code + message) and v3 structured
   # (kind + details + cause chain) error formats.
