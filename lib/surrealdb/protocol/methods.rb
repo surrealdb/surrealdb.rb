@@ -21,6 +21,7 @@ module SurrealDB
       QUERY           = 'query'
       QUERY_STREAM    = 'query_stream'
       QUERY_CANCEL    = 'query_cancel'
+      GQL             = 'gql'
       SELECT          = 'select'
       CREATE          = 'create'
       INSERT          = 'insert'

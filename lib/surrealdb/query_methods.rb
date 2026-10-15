@@ -133,10 +133,46 @@ module SurrealDB
     # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
     # @return [Array<QueryResult>]
     def query_raw(sql, vars = {}, timeout: nil)
-      params = [sql]
-      params << vars unless vars.empty?
-      raw = rpc(Protocol::Methods::QUERY, params, timeout: timeout)
-      Array(raw).map { |stmt| QueryResult.from_response(stmt) }
+      statements(Protocol::Methods::QUERY, sql, vars, timeout)
+    end
+
+    # Runs an ISO GQL (ISO/IEC 39075) query and returns each statement's
+    # result, raising the first failed statement's error, as {#query} does.
+    # A namespace and database must be selected.
+    #
+    # @example
+    #   db.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name", { "min" => 30 })
+    #   # => [[{ "name" => "Alice" }]]
+    # @param query [String] GQL statement(s)
+    # @param vars [Hash] query variables
+    # @param timeout [Numeric, nil] seconds to wait for the result
+    # @return [Array] one result per statement
+    # @raise [UnsupportedError] when the server has no GQL support
+    # @raise [ServerError] when a statement fails
+    def gql(query, vars = {}, timeout: nil)
+      statements(Protocol::Methods::GQL, query, vars, timeout).map do |statement|
+        raise statement.to_error if statement.error?
+
+        statement.result
+      end
+    rescue NotFoundError => e
+      raise unless e.code == METHOD_NOT_FOUND
+
+      raise UnsupportedError, 'this SurrealDB server does not support GQL queries'
+    end
+
+    # A client for the server's user-defined APIs (`DEFINE API`), invoked
+    # through `api::invoke` in this session (and transaction).
+    #
+    # @example
+    #   users = db.api("/users")
+    #   users.header("x-tenant", "acme")
+    #   users.get("/42").value     # => the response body, raising ApiError unless 2xx
+    #   users.post("", { "name" => "Ann" }).status
+    # @param prefix [String] prepended to every path
+    # @return [Api]
+    def api(prefix = '')
+      Api.new(self, prefix)
     end
 
     # Runs a SurrealQL query and yields its results as the server produces
@@ -212,6 +248,13 @@ module SurrealDB
     end
 
     private
+
+    def statements(method, sql, vars, timeout)
+      params = [sql]
+      params << vars unless vars.empty?
+      raw = rpc(method, params, timeout: timeout)
+      Array(raw).map { |stmt| QueryResult.from_response(stmt) }
+    end
 
     # Streams when the connection and server can, and otherwise runs the
     # query buffered and yields the same chunks.

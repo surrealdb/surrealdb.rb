@@ -26,6 +26,17 @@ module SurrealDB
   # Raised when a committed or cancelled transaction is used.
   class TransactionError < Error; end
 
+  # Raised by {ApiResponse#value} for a response outside 2xx.
+  class ApiError < Error
+    # @return [ApiResponse]
+    attr_reader :response
+
+    def initialize(method, path, response)
+      @response = response
+      super("#{method.to_s.upcase} #{path} answered #{response.status}: #{response.body.inspect}")
+    end
+  end
+
   # Raised by {Client#connect} when the server's version is outside the
   # range this SDK supports (see {ServerVersion}).
   class UnsupportedVersionError < Error
