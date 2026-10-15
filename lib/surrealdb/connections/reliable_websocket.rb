@@ -10,6 +10,8 @@ module SurrealDB
     #
     # Modeled on the Go SDK's contrib/rews (reliable WebSocket).
     class ReliableWebSocket < Base
+      TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
+
       # @return [Integer] max reconnection attempts before giving up
       attr_reader :max_retries
 
@@ -59,6 +61,7 @@ module SurrealDB
         reconnect!
         log(:info, "Reconnected after: #{e.message}")
         replay_state
+        raise_transaction_lost(method, e) if txn || TXN_FINISH.include?(method)
         @inner.send_request(method, params, session: session, txn: txn)
       end
 
@@ -183,6 +186,15 @@ module SurrealDB
         elsif state.access_token
           @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
         end
+      end
+
+      # A transaction lives on the connection it began on, so it ended with
+      # that connection; a commit or cancel may also have run already.
+      # Neither is sent to the new connection.
+      def raise_transaction_lost(method, error)
+        raise ConnectionError,
+              "connection lost during '#{method}' in a transaction (#{error.message}); the transaction ended " \
+              'with the connection, and the request was not sent again'
       end
 
       def log(level, message)
