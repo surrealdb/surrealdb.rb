@@ -111,7 +111,12 @@ RSpec.shared_examples 'CRUD operations' do
     client.create(rid('d2'), { 'name' => 'Alice' })
     client.create(rid('d3'), { 'name' => 'Bob' })
     client.delete(table)
-    expect(client.select(table)).to eq([])
+    remaining = begin
+      client.select(table)
+    rescue SurrealDB::NotFoundError # SurrealDB 3.0 may answer this for an emptied table
+      []
+    end
+    expect(remaining).to eq([])
   end
 
   it 'relates two records' do
