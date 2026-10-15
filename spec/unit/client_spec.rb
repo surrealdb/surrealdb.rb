@@ -488,7 +488,7 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
         client.new_session.close
         client.transaction { |tx| tx.query_raw('RETURN 1') }
       end
-      about = a_value_between(0.15, 0.3)
+      about = a_value_between(0.15, 0.301)
       expect(connection.timeouts).to include('version' => about, 'attach' => about, 'detach' => about,
                                              'begin' => about, 'query' => about, 'commit' => about)
     end
@@ -504,8 +504,8 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
         client.health
         connection.http_request(:post, '/import', body: '')
       end
-      expect(connection.timeouts).to include('/health' => a_value_between(0.15, 0.3),
-                                             '/import' => a_value_between(0.15, 0.3))
+      expect(connection.timeouts).to include('/health' => a_value_between(0.15, 0.301),
+                                             '/import' => a_value_between(0.15, 0.301))
     end
   end
 

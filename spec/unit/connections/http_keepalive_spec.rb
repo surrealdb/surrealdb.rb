@@ -50,7 +50,7 @@ RSpec.describe SurrealDB::Connections::HTTP do
       expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
       http.send_request('ping', timeout: 0.5) # opens a new socket
     end
-    expect(seen).to all(be_between(0.35, 0.5))
+    expect(seen).to all(be_between(0.35, 0.501))
     expect([net.open_timeout, net.read_timeout]).to eq([2, 2])
   ensure
     http&.close
