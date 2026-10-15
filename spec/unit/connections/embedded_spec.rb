@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'open3'
+
 # These tests verify the Embedded connection's Ruby logic without loading
 # the actual FFI bindings (which require libsurrealdb_c). We test that
 # the class structure and method signatures are correct.
@@ -31,6 +33,27 @@ RSpec.describe 'SurrealDB::Connections::Embedded (structure)' do
   it 'has the opt-in entrypoint' do
     path = File.expand_path('../../../lib/surrealdb/embedded.rb', __dir__)
     expect(File.exist?(path)).to be true
+  end
+end
+
+RSpec.describe 'SurrealDB::Connections::Embedded notifications' do
+  # Loaded in a separate process: this process checks the class is not
+  # loaded by the main gem, and loading it needs no native library.
+  it 'hands a live notification, whose id decodes as a Uuid, to the handler registered for it' do
+    script = <<~RUBY
+      require 'surrealdb'
+      require 'surrealdb/connections/embedded'
+      conn = SurrealDB::Connections::Embedded.new('mem://')
+      id = SurrealDB::Uuid.v4
+      seen = []
+      conn.on_notification(id.to_s, ->(n) { seen << n['action'] })
+      bytes = SurrealDB::CBOR::Encoder.encode({ 'result' => { 'id' => id, 'action' => 'CREATE' } })
+      conn.send(:dispatch_notification, bytes)
+      print seen.inspect
+    RUBY
+    lib = File.expand_path('../../../lib', __dir__)
+    output, status = Open3.capture2e(RbConfig.ruby, '-I', lib, '-e', script)
+    expect([status.success?, output]).to eq([true, '["CREATE"]'])
   end
 end
 

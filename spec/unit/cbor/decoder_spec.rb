@@ -36,6 +36,45 @@ RSpec.describe SurrealDB::CBOR::Decoder do
       expect(result.id).to eq(42)
     end
 
+    it 'handles Uuid as CBOR tag 37 with 16 raw bytes' do
+      uuid = SurrealDB::Uuid.parse('0190d5ab-7c3e-7d2a-9f1b-123456789abc')
+      raw = CBOR.decode(SurrealDB::CBOR::Encoder.encode(uuid))
+      expect(raw.tag).to eq(37)
+      expect(raw.value.encoding).to eq(Encoding::BINARY)
+      expect(raw.value.bytesize).to eq(16)
+      expect(round_trip(uuid)).to eq(uuid)
+    end
+
+    it 'handles RecordID with a Uuid key' do
+      rid = SurrealDB::RecordID.new('user', SurrealDB::Uuid.v7)
+      expect(round_trip(rid)).to eq(rid)
+    end
+
+    it 'decodes tag 9 (string uuid) to Uuid' do
+      text = '0190d5ab-7c3e-7d2a-9f1b-123456789abc'
+      expect(described_class.decode(CBOR.encode(CBOR::Tagged.new(9, text)))).to eq(SurrealDB::Uuid.parse(text))
+    end
+
+    it 'decodes tag 0 (RFC 3339 datetime) to Time with nanoseconds' do
+      time = described_class.decode(CBOR.encode(CBOR::Tagged.new(0, '2020-01-02T03:04:05.123456789Z')))
+      expect(time).to eq(Time.utc(2020, 1, 2, 3, 4, 5r + Rational(123_456_789, 1_000_000_000)))
+      expect(time.nsec).to eq(123_456_789)
+    end
+
+    it 'handles FileRef as CBOR tag 55' do
+      file = SurrealDB::FileRef.new('bucket', '/a/b.txt')
+      raw = CBOR.decode(SurrealDB::CBOR::Encoder.encode(file))
+      expect([raw.tag, raw.value]).to eq([55, ['bucket', '/a/b.txt']])
+      expect(round_trip(file)).to eq(file)
+    end
+
+    it 'handles Set as CBOR tag 56' do
+      set = Set[1, 'two', SurrealDB::RecordID.new('t', 1)]
+      raw = CBOR.decode(SurrealDB::CBOR::Encoder.encode(set))
+      expect(raw.tag).to eq(56)
+      expect(round_trip(set)).to eq(set)
+    end
+
     it 'handles Duration' do
       d = SurrealDB::Duration.new(3600, 500_000_000)
       result = round_trip(d)
