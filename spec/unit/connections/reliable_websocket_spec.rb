@@ -320,6 +320,22 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe 'detach' do
+    it 'forgets the live queries of the detached session, and their handlers' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: session)
+      live = reliable.send_request('live', ['person'], session: session)
+      kept = reliable.send_request('live', ['person'])
+      [live, kept].each { |id| reliable.on_notification(id, proc {}) }
+      reliable.send_request('detach', [], session: session)
+      expect(inner.handlers.keys).to eq([kept.to_s])
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+      expect(inner.calls.select { |call| call[0] == 'live' }.map { |call| call[2] }).to eq([nil])
+    end
+  end
+
   describe '#on_notification' do
     it 'registers a handler on the inner connection' do
       reliable.on_notification('live-id', proc {})

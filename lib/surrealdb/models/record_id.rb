@@ -76,6 +76,8 @@ module SurrealDB
           raise ArgumentError, "invalid record ID: #{str}" unless finish == rest.length
 
           value
+        elsif rest.match?(/\A[+-]\d+\z/) # a signed number; IDENT has no sign
+          Integer(rest, 10)
         elsif rest.match?(IDENT)
           try_numeric(rest)
         else

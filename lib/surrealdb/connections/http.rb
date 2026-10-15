@@ -73,12 +73,10 @@ module SurrealDB
         # Without an attached session every HTTP request runs in a fresh server
         # session, so a variable set with `let` would be gone by the next
         # request. Keep variables on the client (Base#track_request records
-        # them) and send them with each query instead.
-        if session.nil?
-          return nil if [Protocol::Methods::LET, 'set', Protocol::Methods::UNSET].include?(method)
-
-          params = with_variables(method, params)
-        end
+        # them) and send them with each query instead. `let` and `unset` are
+        # still sent, so the server refuses what it would refuse over
+        # WebSocket (a protected name such as `auth`) before it is recorded.
+        params = with_variables(method, params) if session.nil?
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
@@ -140,7 +138,7 @@ module SurrealDB
         @requests_on_socket += 1
         response
       rescue *STALE_CONNECTION_ERRORS => e
-        restart_http
+        drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
         unless repeatable
           raise RequestInterruptedError,
@@ -151,10 +149,10 @@ module SurrealDB
         log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
         transport(request, repeatable: true, retried: true)
       rescue Net::OpenTimeout, Net::ReadTimeout => e
-        restart_http
+        drop_socket
         raise TimeoutError, "HTTP request timed out: #{e.message}"
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
-        restart_http
+        drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
       end
 
@@ -163,18 +161,13 @@ module SurrealDB
         @requests_on_socket = 0
       end
 
-      # Drops the current socket. The next request opens a new one, so one
-      # failed request does not leave the client unusable.
-      def restart_http
+      # Drops the current socket. The next request opens a new one (see
+      # #transport), so one failed request does not leave the client
+      # unusable, and a failed request does not also wait for a reconnect.
+      def drop_socket
         @http.finish if @http.started?
       rescue IOError
         nil
-      ensure
-        begin
-          start_http
-        rescue StandardError => e
-          log(:debug, "HTTP reconnect deferred: #{e.class}: #{e.message}")
-        end
       end
 
       def log(level, message)

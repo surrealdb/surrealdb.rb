@@ -10,6 +10,8 @@ RSpec.describe SurrealDB::Uuid do
 
   it 'rejects invalid strings and wrong byte lengths' do
     expect { described_class.parse('not-a-uuid') }.to raise_error(ArgumentError)
+    expect { described_class.parse('0190d5ab-7c3e7d2a-9f1b-123456789abc') }.to raise_error(ArgumentError)
+    expect { described_class.parse('0190d5ab7c3e-7d2a-9f1b-123456789abc') }.to raise_error(ArgumentError)
     expect { described_class.new('short') }.to raise_error(ArgumentError)
   end
 

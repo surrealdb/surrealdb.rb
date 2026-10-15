@@ -85,6 +85,18 @@ module SurrealDB
         nil
       end
 
+      # Sends a request to one of the server's HTTP routes (/import, /export)
+      # with a session's namespace, database and credentials. Like RPC
+      # requests, it is refused once the connection has been closed.
+      # @param session [Uuid, nil]
+      # @return [Net::HTTPResponse]
+      # @raise [ConnectionError] if the connection is not open
+      def http_request(verb, path, session: nil, **, &)
+        raise ConnectionError, 'not connected' unless @connected
+
+        http_endpoint.request(verb, path, state: session_state(session), **, &)
+      end
+
       # Whether the server answers `sessions` (listing attached sessions) on
       # this connection.
       # @return [Boolean]

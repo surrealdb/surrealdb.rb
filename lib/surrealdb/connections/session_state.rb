@@ -49,7 +49,7 @@ module SurrealDB
         when Protocol::Methods::AUTHENTICATE then store_tokens(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
         when Protocol::Methods::RESET then reset
-        when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = params[1]
+        when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = snapshot(params[1])
         when Protocol::Methods::UNSET then @variables.delete(params[0].to_s)
         end
       end
@@ -87,6 +87,17 @@ module SurrealDB
       end
 
       private
+
+      # The value as it was sent: later changes to the caller's object must
+      # not change what a fork or a replay sends.
+      def snapshot(value)
+        case value
+        when Hash then value.to_h { |k, v| [snapshot(k), snapshot(v)] }
+        when Array then value.map { |v| snapshot(v) }
+        when String then value.frozen? ? value : value.dup
+        else value
+        end
+      end
 
       # The server answers `use` with the resulting namespace and database
       # (NONE for one that is not set). Older servers answer with nothing, so

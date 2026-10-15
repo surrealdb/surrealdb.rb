@@ -164,17 +164,8 @@ module SurrealDB
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
         when Protocol::Methods::RESET then forget_lives(session)
+        when Protocol::Methods::DETACH then forget_lives(session) if session
         end
-      end
-
-      # The server killed the session's live queries; drop them and their
-      # handlers, which would otherwise never run again but stay reachable.
-      def forget_lives(session)
-        gone = @state_mutex.synchronize do
-          keys = @lives.select { |_, live| live[:session] == session }.keys
-          keys.map { |key| @lives.delete(key) }
-        end
-        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       def track_transaction(method, params, result)
@@ -184,6 +175,17 @@ module SurrealDB
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
+      end
+
+      # The server ended the session's live queries (reset, detach); drop them and
+      # their handlers, which would otherwise never run again but stay
+      # reachable, and would be restored into a session that no longer exists.
+      def forget_lives(session)
+        gone = @state_mutex.synchronize do
+          keys = @lives.select { |_, live| live[:session] == session }.keys
+          keys.map { |key| @lives.delete(key) }
+        end
+        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       # A transaction lives on the connection it began on; once that is gone,
