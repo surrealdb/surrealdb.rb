@@ -109,6 +109,33 @@ module SurrealDB
 
       def supports_transactions? = true
 
+      def supports_streaming?
+        @inner.supports_streaming?
+      end
+
+      def streaming_unavailable!
+        @inner.streaming_unavailable!
+      end
+
+      # A stream that never started is started on the new connection; one
+      # the connection dropped under is not restarted, since its statements
+      # may have run.
+      def stream_request(method, params = [], session: nil, txn: nil, timeout: nil, &)
+        since = generation_seen
+        deadline = call_deadline(timeout)
+        await_restore(deadline, method)
+        begin
+          start_stream(method, params, session, txn, since, deadline, &)
+        rescue NotConnectedError
+          recover(deadline, method)
+          start_stream(method, params, session, txn, since, deadline, &)
+        end
+      rescue NotConnectedError, RequestInterruptedError, AuthenticationError
+        raise
+      rescue ConnectionError => e
+        interrupted!(method, e, deadline)
+      end
+
       def http_endpoint
         @inner.http_endpoint
       end
@@ -195,8 +222,8 @@ module SurrealDB
       rescue ConnectionError => e
         return ended_with_connection(method, params, session, since, deadline) if ends_with_connection?(method, session)
 
+        interrupted!(method, e, deadline) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
         recover(deadline, method)
-        raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
 
         check_auth_kept(method, session, since)
         attempt(method, params, session, txn, deadline)
@@ -220,6 +247,12 @@ module SurrealDB
         raise AuthenticationError,
               "#{session ? "session #{session}" : 'the default session'} could not authenticate again after " \
               "the connection was lost, so it is signed out; '#{request}' was not sent"
+      end
+
+      def start_stream(method, params, session, txn, since, deadline, &) # rubocop:disable Metrics/ParameterLists
+        check_transaction_alive(txn)
+        check_auth_kept(method, session, since)
+        @inner.stream_request(method, params, session: session, txn: txn, **time_left(deadline, method), &)
       end
 
       # Sends one request, translating live query ids the caller holds into
@@ -306,7 +339,14 @@ module SurrealDB
         end
       end
 
-      def raise_interrupted(method, error)
+      # Reconnects, waiting no longer than the deadline, and reports the
+      # request that was in flight as interrupted.
+      def interrupted!(method, error, deadline)
+        begin
+          recover(deadline, method)
+        rescue TimeoutError
+          nil # the reconnect carries on in the background
+        end
         raise RequestInterruptedError,
               "connection lost while '#{method}' was in flight (#{error.message}); " \
               'it was not sent again because it may already have run'

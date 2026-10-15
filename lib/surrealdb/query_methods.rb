@@ -6,6 +6,15 @@ module SurrealDB
   #
   # Includers implement `rpc(method, params)`.
   module QueryMethods
+    # JSON-RPC's code for a method the server does not have.
+    METHOD_NOT_FOUND = -32_601
+    # JSON-RPC's code for a method the server's capabilities deny.
+    METHOD_NOT_ALLOWED = -32_602
+    # A server older than 3.3 has no `query_stream`; one started with
+    # `--deny-rpc query_stream` refuses it before running anything. Either
+    # way the query can still run buffered.
+    STREAMING_REFUSED = [METHOD_NOT_FOUND, METHOD_NOT_ALLOWED].freeze
+
     # --- CRUD ---
 
     # Selects all records from a table, or a single record by ID.
@@ -144,6 +153,45 @@ module SurrealDB
       Array(raw).map { |stmt| QueryResult.from_response(stmt) }
     end
 
+    # Runs a SurrealQL query and yields its results as the server produces
+    # them, instead of holding every row in memory until the query is done.
+    #
+    # Each statement's result arrives as {QueryChunk}s: `:rows` chunks for a
+    # statement that returns rows, a `:value` chunk for one that returns a
+    # single value, then a `:finished` chunk with its time and any error.
+    # After the last chunk, the first failed statement's error is raised, as
+    # {#query} does; rows a failed statement sent before failing are not
+    # valid.
+    #
+    # Streaming needs a WebSocket connection and a server with
+    # `query_stream` (SurrealDB 3.3 and later). Elsewhere the query runs
+    # buffered and its results are yielded as the same chunks. Leaving the
+    # block early stops the query on the server.
+    #
+    # @example
+    #   db.query_stream("SELECT * FROM event") do |chunk|
+    #     chunk.values.each { |row| handle(row) } if chunk.rows?
+    #   end
+    # @param sql [String] SurrealQL statement(s)
+    # @param vars [Hash] query variables
+    # @param timeout [Numeric, nil] seconds to wait for each chunk
+    # @param named [Hash] more query variables, as keywords (see {#query})
+    # @yield [QueryChunk]
+    # @return [Enumerator, nil] an Enumerator of chunks without a block
+    # @raise [ServerError] when a statement fails, after its chunks are yielded
+    def query_stream(sql, vars = {}, timeout: nil, **named, &block)
+      return enum_for(:query_stream, sql, vars, timeout: timeout, **named) unless block
+
+      vars = vars.merge(named) unless named.empty?
+
+      errors = []
+      each_query_chunk(sql, vars, timeout) do |chunk|
+        errors << chunk.error if chunk.error?
+        block.call(chunk)
+      end
+      raise errors.first unless errors.empty?
+    end
+
     # Runs a SurrealDB function.
     # @param function_name [String]
     # @param args [Array] function arguments
@@ -181,6 +229,55 @@ module SurrealDB
     end
 
     private
+
+    # Streams when the connection and server can, and otherwise runs the
+    # query buffered and yields the same chunks.
+    def each_query_chunk(sql, vars, timeout, &)
+      return if connection.supports_streaming? && stream_query_chunks(sql, vars, timeout, &)
+
+      QueryChunk.from_results(query_raw(sql, vars, timeout: timeout)).each(&)
+    end
+
+    # @return [Boolean] false when the server does not offer streaming
+    def stream_query_chunks(sql, vars, timeout, &block)
+      params = [sql]
+      params << vars unless vars.empty?
+      started = false
+      with_result = {} # statements that sent a rows or value frame
+      stream_rpc(Protocol::Methods::QUERY_STREAM, params, timeout) do |frame|
+        started = true
+        raise_stream_failure(frame)
+        chunk = QueryChunk.from_frame(frame)
+        with_implied_result(chunk, with_result, &block) if chunk
+      end
+      true
+    rescue NotFoundError, NotAllowedError => e
+      raise if started || !STREAMING_REFUSED.include?(e.code)
+
+      connection.streaming_unavailable!
+      false
+    end
+
+    # A statement whose result is an empty list (or, with `single`, NONE)
+    # sends no rows or value frame; yield the chunk a buffered result would
+    # have had for it before its :finished chunk.
+    def with_implied_result(chunk, with_result)
+      if !chunk.finished?
+        with_result[chunk.index] = true
+      elsif !chunk.error? && !with_result[chunk.index]
+        yield QueryChunk.implied_by(chunk)
+      end
+      yield chunk
+    end
+
+    # A stream the server stopped (cancelled, or that failed as a whole)
+    # carries the reason on its `end` frame.
+    def raise_stream_failure(frame)
+      error = frame['error']
+      return unless frame['stream'] == 'end' && !error.nil? && !error.is_a?(None)
+
+      raise error.is_a?(Hash) ? ServerError.from_response(error) : ServerError.new(error.to_s)
+    end
 
     # The `timeout:` option for a request: the one given for the call, else
     # the one {#with_timeout} set for this connection in this fiber, else

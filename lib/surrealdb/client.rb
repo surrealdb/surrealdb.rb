@@ -193,6 +193,10 @@ module SurrealDB
       @connection.send_request(method, params, **timeout_option(timeout))
     end
 
+    def stream_rpc(method, params, timeout, &)
+      @connection.stream_request(method, params, **timeout_option(timeout), &)
+    end
+
     def request_session
       nil
     end

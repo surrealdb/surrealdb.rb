@@ -19,6 +19,8 @@ module SurrealDB
       LIVE            = 'live'
       KILL            = 'kill'
       QUERY           = 'query'
+      QUERY_STREAM    = 'query_stream'
+      QUERY_CANCEL    = 'query_cancel'
       SELECT          = 'select'
       CREATE          = 'create'
       INSERT          = 'insert'

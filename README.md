@@ -241,6 +241,32 @@ end
 statement (see [Error Handling](#error-handling)). Statements before it may
 already have run; use `query_raw` to see each statement's outcome.
 
+## Streaming Results
+
+`query_stream` yields results as the server produces them, so a large result never has
+to fit in memory at once. Each statement arrives as `:rows` chunks (or one `:value`
+chunk), then a `:finished` chunk with its time and any error. Leaving the block early
+stops the query on the server.
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+  db.use("test", "test")
+  db.query("FOR $i IN 1..=1000 { CREATE event SET n = $i }")
+
+  db.query_stream("SELECT * FROM event") do |chunk|
+    chunk.values.each { |row| puts row["n"] } if chunk.rows?
+  end
+
+  # Without a block, an Enumerator
+  first_rows = db.query_stream("SELECT * FROM event").find(&:rows?)
+end
+```
+
+Streaming needs a WebSocket connection and SurrealDB 3.3 or later; elsewhere the query
+runs buffered and yields the same chunks. As with `query`, a failed statement's error is
+raised once the stream ends, and rows it sent before failing are not valid.
+
 ## Structured Query Results
 
 Use `query_raw` to get per-statement metadata (status, timing, errors) for multi-statement queries:

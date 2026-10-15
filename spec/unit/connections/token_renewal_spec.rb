@@ -176,6 +176,27 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     expect(connection.session_state).not_to be_renewable
   end
 
+  it 'reports a connection lost while renewing before a stream as the stream never having started' do
+    streaming = Class.new(fake_class) do
+      def supports_streaming?
+        true
+      end
+
+      protected
+
+      def execute_stream(method, *, **)
+        @calls << method
+        yield({ 'stream' => 'end' })
+      end
+    end.new('ws://localhost:8000')
+    streaming.next_expiry = Time.now + 30
+    streaming.send_request('signup', [{}])
+    streaming.fail_on = 'refresh'
+    expect { streaming.stream_request('query_stream', ['RETURN 1']) { nil } }
+      .to raise_error(SurrealDB::NotConnectedError, /'query_stream' was not sent/)
+    expect(streaming.calls).not_to include('query_stream')
+  end
+
   context 'with renew_tokens: false' do
     let(:options) { { renew_tokens: false } }
 

@@ -28,6 +28,7 @@ module SurrealDB
     # the `async` gem and similar frameworks.
     class WebSocket < Base
       include WebSocketConnect
+      include WebSocketStreams
 
       # @return [Integer] response timeout in seconds
       attr_reader :timeout
@@ -41,6 +42,7 @@ module SurrealDB
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
         @connect_timeout = options.fetch(:connect_timeout, @timeout)
         @pending = {}
+        @streams = {}
         @live_handlers = {}
         @mutex = Mutex.new
         @write_mutex = Mutex.new
@@ -80,6 +82,7 @@ module SurrealDB
         end
 
         @connected = true
+        @streaming_unavailable = false # the new connection may reach another server
         start_reader
         log(:debug, "WebSocket connected to #{@url}")
       end
@@ -97,6 +100,10 @@ module SurrealDB
 
       def supports_live_queries?
         true
+      end
+
+      def supports_streaming?
+        !@streaming_unavailable
       end
 
       # Registers a handler for live query notifications.
@@ -280,21 +287,29 @@ module SurrealDB
         raw = ::CBOR.decode(bytes)
         id = raw['id']
 
-        if id
-          delivered = @mutex.synchronize do
-            entry = @pending[id]
-            if entry
-              entry[:result] = bytes
-              entry[:cv].signal
-              true
-            end
-          end
-          dispatch_notification(raw) unless delivered
-        else
-          dispatch_notification(raw)
-        end
+        dispatch_notification(raw) unless id && deliver_response(id, bytes)
       rescue StandardError => e
         log(:warn, "Dropped malformed WebSocket message: #{e.class}: #{e.message}")
+      end
+
+      # Hands a response to the request or stream waiting for it.
+      # @return [Boolean] false when nothing is waiting for that id
+      def deliver_response(id, bytes)
+        stream = nil
+        delivered = @mutex.synchronize do
+          stream = @streams[id]
+          next true if stream
+
+          entry = @pending[id]
+          next false unless entry
+
+          entry[:result] = bytes
+          entry[:cv].signal
+          true
+        end
+        # Outside the mutex: feeding a stream can wait for its reader.
+        feed_stream(id, stream, bytes) if stream
+        delivered
       end
 
       def dispatch_notification(raw) # rubocop:disable Metrics/CyclomaticComplexity
@@ -333,6 +348,8 @@ module SurrealDB
             entry[:cv].signal
           end
           @pending.clear
+          @streams.each_value { |frames| frames.fail(ConnectionError.new('connection closed')) }
+          @streams.clear
         end
       end
 

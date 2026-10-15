@@ -246,6 +246,33 @@ RSpec.describe SurrealDB::Client do
       expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
     end
 
+    it 'refuses to commit while a stream inside it is still running' do
+      allow(connection).to receive(:supports_streaming?).and_return(true)
+      allow(connection).to receive(:stream_request) do |*, **, &block|
+        block.call({ 'stream' => 'rows', 'index' => 0, 'values' => [1] })
+        block.call({ 'stream' => 'end' })
+      end
+      tx = client.begin_transaction
+      refused = nil
+      tx.query_stream('SELECT * FROM person') do
+        tx.commit
+      rescue SurrealDB::TransactionError => e
+        refused = e
+      end
+      expect(refused&.message).to match(/has not finished/)
+      expect(tx).to be_open
+      tx.commit
+      expect(tx).to be_committed
+    end
+
+    it 'is lost when the connection drops under a stream inside it' do
+      allow(connection).to receive(:supports_streaming?).and_return(true)
+      allow(connection).to receive(:stream_request).and_raise(SurrealDB::RequestInterruptedError, 'dropped')
+      tx = client.begin_transaction
+      expect { tx.query_stream('SELECT * FROM person').to_a }.to raise_error(SurrealDB::RequestInterruptedError)
+      expect(tx).not_to be_open
+    end
+
     it 'is lost when a request through it times out, as it may still be running' do
       allow(connection).to receive(:send_request).with('query', any_args).and_raise(SurrealDB::TimeoutError, 'slow')
       tx = client.begin_transaction

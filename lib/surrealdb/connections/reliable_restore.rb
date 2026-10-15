@@ -4,7 +4,8 @@ module SurrealDB
   module Connections
     # What {ReliableWebSocket} brings back after a reconnect: every session
     # with its namespace, database, variables and credentials, and every
-    # live query started with `live`.
+    # live query started with `live`; and what it must not bring back, as a
+    # kill or detach ended it with the connection.
     module ReliableRestore
       # How long a restore waits for requests whose response already arrived
       # to record it (see #await_deliveries).
@@ -145,9 +146,9 @@ module SurrealDB
       # fail with the old connection; those made on the new one meanwhile
       # are waited for only up to DELIVERY_WAIT.
       def await_deliveries
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DELIVERY_WAIT
+        deadline = monotonic_now + DELIVERY_WAIT
         @state_mutex.synchronize do
-          while @delivering.positive? && (left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)).positive?
+          while @delivering.positive? && (left = deadline - monotonic_now).positive?
             @delivered.wait(@state_mutex, left)
           end
         end
