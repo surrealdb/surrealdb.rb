@@ -69,13 +69,18 @@ module SurrealDB
         @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
       end
 
+      # The handler is read once the fresh id is in place: one registered
+      # meanwhile went under the old id, whose handler is dropped.
       def restore_live_queries
         lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
         lives.each do |key, live|
-          @inner.remove_notification_handler(live[:current].to_s)
           fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          @state_mutex.synchronize { @lives[key][:current] = fresh if @lives.key?(key) }
-          @inner.on_notification(fresh.to_s, relabel(key, live[:handler])) if live[:handler]
+          handler = @state_mutex.synchronize do
+            @lives[key][:current] = fresh if @lives.key?(key)
+            @lives.dig(key, :handler)
+          end
+          @inner.remove_notification_handler(live[:current].to_s)
+          @inner.on_notification(fresh.to_s, relabel(key, handler)) if handler
         rescue ServerError => e
           log(:error, "Could not restore live query #{key}: #{e.message}")
         end

@@ -172,6 +172,9 @@ module SurrealDB
     # @return [void]
     def subscribe(live_query_id, &block)
       require_live_queries!
+      # An id from a LIVE SELECT statement or send_rpc is not in the list
+      # yet; {#reset} removes its handler too.
+      live_query_ids << live_query_id.to_s unless live_query_ids.include?(live_query_id.to_s)
       connection.on_notification(live_query_id.to_s, block)
     end
 
@@ -295,6 +298,18 @@ module SurrealDB
     # @return [Hash, nil]
     def info
       rpc(Protocol::Methods::INFO)
+    end
+
+    # --- Generic RPC ---
+
+    # Sends an arbitrary RPC method call. Useful as an escape hatch for
+    # server methods not yet wrapped by the SDK. On a {Session} it runs in
+    # that session.
+    # @param method [String] RPC method name
+    # @param params [Array] method parameters
+    # @return [Object] decoded result
+    def send_rpc(method, params = [])
+      rpc(method, params)
     end
 
     private

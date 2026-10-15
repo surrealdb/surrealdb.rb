@@ -42,6 +42,7 @@ module SurrealDB
         http = Net::HTTP.new(@base.host, @base.port)
         http.use_ssl = @base.scheme == 'https'
         http.open_timeout = @timeout
+        http.write_timeout = @timeout
         http.read_timeout = @timeout
         http.start do |conn|
           conn.request(req) do |response|
@@ -55,7 +56,7 @@ module SurrealDB
         end
       rescue BlockError => e
         raise e.original
-      rescue Net::OpenTimeout, Net::ReadTimeout => e
+      rescue Net::OpenTimeout, Net::WriteTimeout, Net::ReadTimeout => e
         raise TimeoutError, "HTTP #{path} timed out: #{e.message}"
       rescue SystemCallError, IOError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"

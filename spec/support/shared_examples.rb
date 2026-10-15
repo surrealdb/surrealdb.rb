@@ -479,6 +479,13 @@ RSpec.shared_examples 'session variables' do
     tags << 'b'
     expect(value_of('RETURN $tags')).to eq(['a'])
   end
+
+  it 'keeps what a typed value held when it was set, too' do
+    id = ['a']
+    client.set('rid', SurrealDB::RecordID.new('user', id))
+    id << 'b'
+    expect(value_of('RETURN $rid')).to eq(SurrealDB::RecordID.new('user', ['a']))
+  end
 end
 
 RSpec.shared_examples 'session lifecycle' do
