@@ -390,3 +390,30 @@ RSpec.shared_examples 'import and export' do
     expect(client.select(rid('rt'))).to include('name' => 'Round', 'tags' => %w[a b])
   end
 end
+
+RSpec.shared_examples 'session variables' do
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  it 'keeps a variable set with set/let for later queries' do
+    client.set('greeting', 'hello')
+    client.let('count', 3)
+    expect(value_of('RETURN $greeting')).to eq('hello')
+    expect(value_of('RETURN [$greeting, $count]')).to eq(['hello', 3])
+  end
+
+  it 'lets query variables override session variables for that query only' do
+    client.set('who', 'session')
+    expect(value_of('RETURN $who', { 'who' => 'query' })).to eq('query')
+    expect(value_of('RETURN $who')).to eq('session')
+  end
+
+  it 'forgets a variable after unset' do
+    client.set('temp', 1)
+    client.unset('temp')
+    expect(value_of('RETURN $temp')).to eq(SurrealDB::NONE)
+  end
+end

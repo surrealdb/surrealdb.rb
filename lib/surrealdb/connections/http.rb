@@ -53,8 +53,21 @@ module SurrealDB
 
       protected
 
+      # Methods that take query variables as their second param.
+      VARIABLE_METHODS = [Protocol::Methods::QUERY].freeze
+
       def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
+
+        # Without an attached session every HTTP request runs in a fresh server
+        # session, so a variable set with `let` would be gone by the next
+        # request. Keep variables on the client (Base#track_request records
+        # them) and send them with each query instead.
+        if session.nil?
+          return nil if [Protocol::Methods::LET, 'set', Protocol::Methods::UNSET].include?(method)
+
+          params = with_variables(method, params)
+        end
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
@@ -66,6 +79,15 @@ module SurrealDB
       end
 
       private
+
+      def with_variables(method, params)
+        return params unless VARIABLE_METHODS.include?(method)
+
+        variables = session_state.variables
+        return params if variables.empty?
+
+        [params[0], variables.merge(params[1] || {})]
+      end
 
       # Each HTTP request runs in a fresh server session unless it names an
       # attached one, so the namespace, database and token the client has
