@@ -2,6 +2,43 @@
 
 module SurrealDB
   module Connections
+    # The frames of one streaming response, on their way from the reader
+    # thread to the caller. The buffer is bounded so a large result is never
+    # held whole: when the caller falls behind, the reader thread waits for
+    # it, which stops reading the socket and so slows the server down.
+    class StreamFrames
+      # Frames buffered before the reader thread waits for the caller.
+      CAPACITY = 32
+
+      def initialize(capacity = CAPACITY)
+        @queue = Thread::SizedQueue.new(capacity)
+        @error = nil
+      end
+
+      # @return [Boolean] false if the caller made no room within timeout
+      def push(frame, timeout)
+        !@queue.push(frame, timeout: timeout).nil?
+      rescue ClosedQueueError
+        false
+      end
+
+      # Ends the stream: the caller gets the frames already buffered, then
+      # this error. Never blocks.
+      def fail(error)
+        @error ||= error
+        @queue.close
+      end
+
+      # @raise [Error] the error the stream failed with, or TimeoutError
+      def pop(timeout)
+        frame = @queue.pop(timeout: timeout)
+        return frame unless frame.nil?
+        raise @error if @error
+
+        raise TimeoutError, "no stream frame within #{timeout}s"
+      end
+    end
+
     # Streaming responses for {WebSocket}: requests such as `query_stream`
     # that the server answers with a sequence of frames under one request id.
     module WebSocketStreams
@@ -13,7 +50,7 @@ module SurrealDB
         raise NotConnectedError, 'not connected' unless @connected
 
         id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
-        frames = Thread::Queue.new
+        frames = StreamFrames.new
         @mutex.synchronize { @streams[id] = frames }
         done = false
         begin
@@ -37,11 +74,18 @@ module SurrealDB
       private
 
       def next_stream_frame(frames, timeout)
-        frame = frames.pop(timeout: timeout)
-        raise TimeoutError, "no stream frame within #{timeout}s" if frame.nil?
-        raise ConnectionError, 'connection closed' if frame == :closed
+        Protocol::Response.extract_result(@rpc.decode_response(frames.pop(timeout)))
+      end
 
-        Protocol::Response.extract_result(@rpc.decode_response(frame))
+      # Called by the reader thread with a frame for a stream. It waits up to
+      # the connection's timeout for the caller to make room, and gives the
+      # stream up after that, so a caller that stopped reading cannot hold
+      # up every other response on the connection for longer.
+      def feed_stream(id, frames, bytes)
+        return if frames.push(bytes, @timeout)
+
+        @mutex.synchronize { @streams.delete(id) if @streams[id].equal?(frames) }
+        frames.fail(TimeoutError.new("stream not read for #{@timeout}s; it was stopped"))
       end
 
       # Asks the server to stop a stream the caller stopped reading. Its last

@@ -43,10 +43,7 @@ module SurrealDB
     # Detaches the session, discarding its server-side state.
     # @return [void]
     def close
-      return if @closed
-
       @client.detach(self)
-      @closed = true
     end
     alias detach close
 
@@ -63,6 +60,11 @@ module SurrealDB
 
     def request_session
       @id
+    end
+
+    # Called by {Client#detach} once the server has detached the session.
+    def detached!
+      @closed = true
     end
 
     def rpc(method, params = [], timeout: nil)

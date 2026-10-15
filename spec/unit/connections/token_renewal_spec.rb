@@ -9,7 +9,11 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
   let(:fake_class) do
     Class.new(described_class) do
       attr_reader :calls
-      attr_accessor :next_expiry
+      attr_accessor :next_expiry, :fail_on
+
+      def timeouts
+        @timeouts ||= {}
+      end
 
       def initialize(url, **options)
         super
@@ -19,8 +23,11 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
 
       protected
 
-      def execute(method, *, **)
+      def execute(method, *, timeout: nil, **)
         @calls << method
+        timeouts[method] = timeout
+        raise SurrealDB::ConnectionError, 'connection closed' if method == fail_on
+
         case method
         when 'signin' then token
         when 'refresh' then { 'access' => token, 'refresh' => "r#{@calls.size}" }
@@ -73,6 +80,35 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     connection.send_request('authenticate', ['other'])
     connection.send_request('invalidate')
     expect(connection.calls).to eq(%w[signup authenticate invalidate])
+  end
+
+  it 'renews before an import or export, which go over HTTP rather than RPC' do
+    endpoint = instance_double(SurrealDB::Connections::HTTPEndpoint)
+    allow(endpoint).to receive(:request) { connection.calls << 'POST /import' }
+    allow(connection).to receive(:http_endpoint).and_return(endpoint)
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.next_expiry = Time.now + 3600
+    connection.http_request(:post, '/import', body: 'OPTION IMPORT;')
+    expect(connection.calls).to eq(['signup', 'refresh', 'POST /import'])
+    expect(endpoint).to have_received(:request)
+      .with(:post, '/import', state: connection.session_state, body: 'OPTION IMPORT;')
+  end
+
+  it 'reports a connection lost while renewing as the request never having been sent' do
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.fail_on = 'refresh'
+    expect { connection.send_request('create', ['person']) }
+      .to raise_error(SurrealDB::NotConnectedError, /renewing the access token.*'create' was not sent/)
+    expect(connection.calls).not_to include('create')
+  end
+
+  it 'bounds the renewal by the timeout of the request that needs it' do
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.send_request('query', ['RETURN 1'], timeout: 0.3)
+    expect(connection.timeouts).to include('refresh' => 0.3, 'query' => 0.3)
   end
 
   context 'with renew_tokens: false' do

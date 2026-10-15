@@ -263,7 +263,7 @@ SurrealDB.connect("ws://localhost:8000") do |db|
 end
 ```
 
-Streaming needs a WebSocket connection and SurrealDB 3.1 or later; elsewhere the query
+Streaming needs a WebSocket connection and SurrealDB 3.3 or later; elsewhere the query
 runs buffered and yields the same chunks. As with `query`, a failed statement's error is
 raised once the stream ends, and rows it sent before failing are not valid.
 
@@ -333,7 +333,7 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   fork.set("tenant", "acme")
   fork.close
 
-  db.sessions # => ids of the sessions attached on this connection (WebSocket only)
+  db.sessions # => ids of the sessions attached on this connection (not over HTTP)
 end
 ```
 

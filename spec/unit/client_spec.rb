@@ -141,7 +141,8 @@ RSpec.describe SurrealDB::Client do
 
   describe 'sessions' do
     let(:connection) do
-      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true)
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true,
+                                                         supports_session_listing?: true)
     end
     let(:client) { described_class.new('ws://localhost:8000') }
 
@@ -168,6 +169,22 @@ RSpec.describe SurrealDB::Client do
       session.close
       expect(connection).to have_received(:send_request).with('detach', [], session: session.id)
       expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    end
+
+    it 'closes a Session detached through the client' do
+      session = client.new_session
+      client.detach(session)
+      expect(session).to be_closed
+      expect { session.select('person') }.to raise_error(SurrealDB::SessionError)
+      session.close
+      expect(connection).to have_received(:send_request).with('detach', [], session: session.id).once
+    end
+
+    it 'refuses to list sessions over HTTP, where the server rejects it' do
+      http = described_class.new('http://localhost:8000')
+      allow(http.connection).to receive(:send_request)
+      expect { http.sessions }.to raise_error(SurrealDB::UnsupportedError, /listing sessions/)
+      expect(http.connection).not_to have_received(:send_request)
     end
 
     it 'detaches when the block form returns, even on error' do
@@ -247,6 +264,32 @@ RSpec.describe SurrealDB::Client do
       expect(connection).to have_received(:send_request)
         .with('select', [SurrealDB::Table.new('person')], session: session.id, txn: txn_id)
       expect(connection).to have_received(:send_request).with('commit', [txn_id], session: session.id)
+    end
+
+    it 'marks open transactions cancelled when the session is reset' do
+      open = client.begin_transaction
+      done = client.begin_transaction
+      done.commit
+      client.reset
+      expect(open).to be_cancelled
+      expect(done).to be_committed
+      expect { open.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError)
+    end
+  end
+
+  describe '#reset' do
+    let(:client) { described_class.new('ws://localhost:8000', reconnect: false) }
+    let(:live_id) { SurrealDB::Uuid.v4 }
+
+    before do
+      allow(client.connection).to receive(:send_request).and_return(nil)
+      allow(client.connection).to receive(:send_request).with('live', anything).and_return(live_id)
+    end
+
+    it 'removes the handlers of the live queries the server killed' do
+      client.subscribe(client.live('person')) { nil }
+      client.reset
+      expect(client.connection.instance_variable_get(:@live_handlers)).to be_empty
     end
   end
 
@@ -351,6 +394,40 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
     allow(other_connection).to receive(:send_request).and_return([])
     client.with_timeout(3) { other.select('x') }
     expect(other_connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('x')])
+  end
+
+  context 'with requests the client sends straight to the connection' do
+    # Records the timeout each request reaches the transport with.
+    let(:connection) do
+      Class.new(SurrealDB::Connections::Base) do
+        attr_reader :timeouts
+
+        def initialize(url)
+          super
+          @timeouts = {}
+          @connected = true
+        end
+
+        protected
+
+        def execute(method, _params, timeout: nil, **)
+          @timeouts[method] = timeout
+          method == 'begin' ? SurrealDB::Uuid.v4 : nil
+        end
+      end.new('ws://localhost:8000')
+    end
+
+    before { allow(connection).to receive(:send_request).and_call_original }
+
+    it 'applies with_timeout to them too: version, sessions and the commit of a transaction' do
+      client.with_timeout(0.3) do
+        client.version
+        client.new_session.close
+        client.transaction { |tx| tx.query_raw('RETURN 1') }
+      end
+      expect(connection.timeouts).to include('version' => 0.3, 'attach' => 0.3, 'detach' => 0.3,
+                                             'begin' => 0.3, 'query' => 0.3, 'commit' => 0.3)
+    end
   end
 
   it 'refuses a timeout that is not a positive number' do

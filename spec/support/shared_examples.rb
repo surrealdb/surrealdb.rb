@@ -678,6 +678,12 @@ RSpec.shared_examples 'query streaming' do
     expect(chunks.select(&:finished?).map(&:time)).to all(be_a(String))
   end
 
+  it 'gives a statement with an empty result a chunk for it, as buffered results do' do
+    chunks = client.query_stream("RETURN []; SELECT * FROM #{table} WHERE n > 99; RETURN 1").to_a
+    expect(chunks.reject(&:finished?).map { |c| [c.index, c.kind, c.values] })
+      .to eq([[0, :rows, []], [1, :rows, []], [2, :value, [1]]])
+  end
+
   it 'yields the same results as query' do
     sql = "SELECT * FROM #{table} WHERE n > $min ORDER BY n; RETURN 'x'"
     chunks = client.query_stream(sql, { 'min' => 2 }).to_a # an Enumerator without a block

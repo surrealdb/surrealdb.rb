@@ -186,7 +186,7 @@ module SurrealDB
     # valid.
     #
     # Streaming needs a WebSocket connection and a server with
-    # `query_stream` (SurrealDB 3.1 and later). Elsewhere the query runs
+    # `query_stream` (SurrealDB 3.3 and later). Elsewhere the query runs
     # buffered and its results are yielded as the same chunks. Leaving the
     # block early stops the query on the server.
     #
@@ -265,15 +265,16 @@ module SurrealDB
     end
 
     # @return [Boolean] false when the server does not offer streaming
-    def stream_query_chunks(sql, vars, timeout)
+    def stream_query_chunks(sql, vars, timeout, &block)
       params = [sql]
       params << vars unless vars.empty?
       started = false
+      with_result = {} # statements that sent a rows or value frame
       stream_rpc(Protocol::Methods::QUERY_STREAM, params, timeout) do |frame|
         started = true
         raise_stream_failure(frame)
         chunk = QueryChunk.from_frame(frame)
-        yield chunk if chunk
+        with_implied_result(chunk, with_result, &block) if chunk
       end
       true
     rescue NotFoundError => e
@@ -281,6 +282,18 @@ module SurrealDB
 
       connection.streaming_unavailable!
       false
+    end
+
+    # A statement whose result is an empty list (or, with `single`, NONE)
+    # sends no rows or value frame; yield the chunk a buffered result would
+    # have had for it before its :finished chunk.
+    def with_implied_result(chunk, with_result)
+      if !chunk.finished?
+        with_result[chunk.index] = true
+      elsif !chunk.error? && !with_result[chunk.index]
+        yield QueryChunk.implied_by(chunk)
+      end
+      yield chunk
     end
 
     # A stream the server stopped (cancelled, or that failed as a whole)

@@ -54,7 +54,8 @@ module SurrealDB
       # @return [Object] decoded result
       # @raise [TimeoutError] when no response arrives in time
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
-        renew_tokens(session) if @renew_tokens && !NO_RENEWAL.include?(method)
+        timeout = call_timeout(timeout)
+        renew_before(method, session, timeout) unless NO_RENEWAL.include?(method)
         result = execute(method, params, session: session, txn: txn, **(timeout ? { timeout: timeout } : {}))
         track_request(method, params, result, session)
         result
@@ -122,6 +123,16 @@ module SurrealDB
         @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
       end
 
+      # Sends a request to one of the server's HTTP routes (/import, /export)
+      # with a session's namespace, database and credentials, renewing its
+      # access token first as {#send_request} does.
+      # @param session [Uuid, nil]
+      # @return [Net::HTTPResponse]
+      def http_request(verb, path, session: nil, **, &)
+        renew_before(path, session)
+        http_endpoint.request(verb, path, state: session_state(session), **, &)
+      end
+
       # Asks the server's HTTP /health route whether it is up and its storage
       # is reachable.
       # @return [void]
@@ -131,6 +142,13 @@ module SurrealDB
         response = http_endpoint.request(:get, '/health')
         HTTPEndpoint.raise_for(response, 'health check') unless response.is_a?(Net::HTTPSuccess)
         nil
+      end
+
+      # Whether the server answers `sessions` (listing attached sessions) on
+      # this connection.
+      # @return [Boolean]
+      def supports_session_listing?
+        true
       end
 
       # What the client has told a session so far.
@@ -177,7 +195,32 @@ module SurrealDB
       # session does not silently lose its credentials: with the refresh
       # token when there is one, otherwise by signing in again with the
       # credentials it last signed in with.
-      def renew_tokens(session)
+      # Renews the session's token if it is about to expire. Losing the
+      # connection while renewing means the request itself was never sent,
+      # so it is reported as NotConnectedError, which is safe to retry,
+      # rather than as an error from the request.
+      # The timeout for a request: the one given for the call, else the one
+      # {QueryMethods#with_timeout} set for this connection on this thread
+      # (which so covers every request, not only those made through query
+      # methods), else nil for the connection's own.
+      def call_timeout(timeout)
+        timeout || Thread.current[:surrealdb_call_timeouts]&.[](self)
+      end
+
+      def renew_before(request, session, timeout = nil)
+        return unless @renew_tokens
+
+        renew_tokens(session, timeout)
+      rescue NotConnectedError
+        raise
+      rescue ConnectionError => e
+        raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
+                                 "'#{request}' was not sent"
+      end
+
+      # The renewal is a prerequisite of the request, so the request's timeout
+      # bounds it too.
+      def renew_tokens(session, timeout = nil)
         state = session_state(session)
         return unless state&.expiring?(@token_refresh_margin) && state.renewable?
 
@@ -186,9 +229,9 @@ module SurrealDB
 
           log(:debug, 'Access token expiring; renewing it')
           if state.refresh_token
-            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
+            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session, timeout: timeout)
           else
-            send_request(*state.signin, session: session)
+            send_request(*state.signin, session: session, timeout: timeout)
           end
         end
       rescue ServerError => e
