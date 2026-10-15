@@ -102,4 +102,11 @@ RSpec.describe 'SurrealDB::Native::Options' do
     expect { timeout_seconds(-1) }.to raise_error(ArgumentError, /negative/)
     expect { timeout_seconds('30') }.to raise_error(ArgumentError, /number of seconds/)
   end
+
+  it 'rejects numbers that are not finite and real with ArgumentError too' do
+    [Float::NAN, Float::INFINITY, -Float::INFINITY, Complex(1, 2), Complex(5, 0)].each do |value|
+      expect { timeout_seconds(value) }.to raise_error(ArgumentError, /finite number of seconds/)
+    end
+    expect(timeout_seconds(Rational(3, 2))).to eq(2)
+  end
 end

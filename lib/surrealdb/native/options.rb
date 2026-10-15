@@ -16,10 +16,13 @@ module SurrealDB
       # @param value [Numeric, nil] seconds
       # @param name [Symbol] the option, for the error message
       # @return [Integer] 0..255
-      # @raise [ArgumentError] for negative values or values above 255
+      # @raise [ArgumentError] for anything but a finite, real, non-negative
+      #   number up to 255
       def timeout_seconds(value, name)
         return 0 if value.nil?
-        raise ArgumentError, "#{name} must be a number of seconds, got #{value.inspect}" unless value.is_a?(Numeric)
+        unless value.is_a?(Numeric) && value.real? && value.finite?
+          raise ArgumentError, "#{name} must be a finite number of seconds, got #{value.inspect}"
+        end
         raise ArgumentError, "#{name} must not be negative, got #{value}" if value.negative?
 
         seconds = value.ceil
