@@ -166,7 +166,7 @@ module SurrealDB
       rescue Net::OpenTimeout => e
         raise TimeoutError, "HTTP connect timed out: #{e.message}"
       rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
-        raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
+        raise ConnectionError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
       end
 
       def start_http
