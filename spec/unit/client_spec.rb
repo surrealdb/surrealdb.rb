@@ -55,6 +55,13 @@ RSpec.describe SurrealDB::Client do
     it 'raises UnsupportedError for #begin_transaction on HTTP' do
       expect { client.begin_transaction }.to raise_error(SurrealDB::UnsupportedError, /transactions/)
     end
+
+    it 'raises UnsupportedError for #commit and #cancel by id on HTTP, sending nothing' do
+      allow(client.connection).to receive(:send_request)
+      expect { client.commit(SurrealDB::Uuid.v4) }.to raise_error(SurrealDB::UnsupportedError, /transactions/)
+      expect { client.cancel(SurrealDB::Uuid.v4) }.to raise_error(SurrealDB::UnsupportedError, /transactions/)
+      expect(client.connection).not_to have_received(:send_request)
+    end
   end
 
   describe '#create data parameter' do
@@ -218,6 +225,16 @@ RSpec.describe SurrealDB::Client do
     it 'cancels when the block raises' do
       expect { client.begin_transaction { |_tx| raise 'boom' } }.to raise_error('boom')
       expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
+      expect(connection).not_to have_received(:send_request).with('commit', anything, anything)
+    end
+
+    it 'cancels when the block leaves early with break, return or throw' do
+      client.begin_transaction { |_tx| break }
+      catch(:out) { client.begin_transaction { |_tx| throw :out } }
+      leave = ->(c) { c.begin_transaction { |_tx| return :early } }
+      expect(leave.call(client)).to eq(:early)
+
+      expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil).exactly(3).times
       expect(connection).not_to have_received(:send_request).with('commit', anything, anything)
     end
 
