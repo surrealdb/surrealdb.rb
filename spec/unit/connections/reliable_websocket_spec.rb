@@ -95,7 +95,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     it 'attaches them again with their state before retrying a request made in one' do
       dropped = false
       allow(inner).to receive_messages(connect: nil, close: nil)
-      allow(inner).to receive(:execute) do |method, params, session: nil|
+      allow(inner).to receive(:execute) do |method, params, session: nil, **|
         sent << [method, params, session]
         if method == 'select' && !dropped
           dropped = true
