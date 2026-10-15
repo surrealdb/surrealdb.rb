@@ -17,10 +17,15 @@ module SurrealDB
     # header state (ns/db/token) is shared. Use a separate Client per thread
     # or wrap calls in your own Mutex.
     class HTTP < Base
+      # Errors that mean the kept-alive socket was already dead: the server
+      # closed it while idle, and the close raced our request.
+      STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED].freeze
+
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
         @http = nil
+        @requests_on_socket = 0
       end
 
       def connect
@@ -32,7 +37,7 @@ module SurrealDB
 
         @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
 
-        @http.start
+        start_http
         @connected = true
         log(:debug, "HTTP connected to #{@url}")
       end
@@ -106,17 +111,59 @@ module SurrealDB
         req
       end
 
+      # Sends the request on the kept-alive connection.
+      #
+      # If that socket turns out to be dead (the server closed it while idle,
+      # racing our request), the request is sent once more on a new socket.
+      # This is safe for every method, not just idempotent ones: it only
+      # happens on a socket that already served a request, and the error
+      # arrives before any response byte, which is the case where the server
+      # dropped the request unread. Go's net/http retries the same case.
       def execute_request(request)
-        response = @http.request(request)
-
-        raise ConnectionError, "HTTP #{response.code}: #{response.message}" unless response.is_a?(Net::HTTPSuccess)
+        response = transport(request)
+        HTTPEndpoint.raise_for(response, 'request') unless response.is_a?(Net::HTTPSuccess)
 
         response
+      end
+
+      def transport(request, retried: false)
+        start_http unless @http.started?
+        reused = @requests_on_socket.positive?
+        response = @http.request(request)
+        @requests_on_socket += 1
+        response
+      rescue *STALE_CONNECTION_ERRORS => e
+        restart_http
+        if reused && !retried
+          log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
+          return transport(request, retried: true)
+        end
+        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
       rescue Net::OpenTimeout, Net::ReadTimeout => e
+        restart_http
         raise TimeoutError, "HTTP request timed out: #{e.message}"
-      rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError => e
-        @connected = false
-        raise ConnectionError, "HTTP connection error: #{e.message}"
+      rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
+        restart_http
+        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+      end
+
+      def start_http
+        @http.start
+        @requests_on_socket = 0
+      end
+
+      # Drops the current socket. The next request opens a new one, so one
+      # failed request does not leave the client unusable.
+      def restart_http
+        @http.finish if @http.started?
+      rescue IOError
+        nil
+      ensure
+        begin
+          start_http
+        rescue StandardError => e
+          log(:debug, "HTTP reconnect deferred: #{e.class}: #{e.message}")
+        end
       end
 
       def log(level, message)
