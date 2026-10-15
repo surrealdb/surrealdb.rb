@@ -11,6 +11,10 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
       attr_reader :calls
       attr_accessor :next_expiry, :fail_on
 
+      def timeouts
+        @timeouts ||= {}
+      end
+
       def initialize(url, **options)
         super
         @calls = []
@@ -19,8 +23,9 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
 
       protected
 
-      def execute(method, *, **)
+      def execute(method, *, timeout: nil, **)
         @calls << method
+        timeouts[method] = timeout
         raise SurrealDB::ConnectionError, 'connection closed' if method == fail_on
 
         case method
@@ -97,6 +102,13 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     expect { connection.send_request('create', ['person']) }
       .to raise_error(SurrealDB::NotConnectedError, /renewing the access token.*'create' was not sent/)
     expect(connection.calls).not_to include('create')
+  end
+
+  it 'bounds the renewal by the timeout of the request that needs it' do
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.send_request('query', ['RETURN 1'], timeout: 0.3)
+    expect(connection.timeouts).to include('refresh' => 0.3, 'query' => 0.3)
   end
 
   context 'with renew_tokens: false' do

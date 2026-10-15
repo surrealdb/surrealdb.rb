@@ -54,7 +54,8 @@ module SurrealDB
       # @return [Object] decoded result
       # @raise [TimeoutError] when no response arrives in time
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
-        renew_before(method, session) unless NO_RENEWAL.include?(method)
+        timeout = call_timeout(timeout)
+        renew_before(method, session, timeout) unless NO_RENEWAL.include?(method)
         result = execute(method, params, session: session, txn: txn, **(timeout ? { timeout: timeout } : {}))
         track_request(method, params, result, session)
         result
@@ -161,10 +162,18 @@ module SurrealDB
       # connection while renewing means the request itself was never sent,
       # so it is reported as NotConnectedError, which is safe to retry,
       # rather than as an error from the request.
-      def renew_before(request, session)
+      # The timeout for a request: the one given for the call, else the one
+      # {QueryMethods#with_timeout} set for this connection on this thread
+      # (which so covers every request, not only those made through query
+      # methods), else nil for the connection's own.
+      def call_timeout(timeout)
+        timeout || Thread.current[:surrealdb_call_timeouts]&.[](self)
+      end
+
+      def renew_before(request, session, timeout = nil)
         return unless @renew_tokens
 
-        renew_tokens(session)
+        renew_tokens(session, timeout)
       rescue NotConnectedError
         raise
       rescue ConnectionError => e
@@ -172,7 +181,9 @@ module SurrealDB
                                  "'#{request}' was not sent"
       end
 
-      def renew_tokens(session)
+      # The renewal is a prerequisite of the request, so the request's timeout
+      # bounds it too.
+      def renew_tokens(session, timeout = nil)
         state = session_state(session)
         return unless state&.expiring?(@token_refresh_margin) && state.renewable?
 
@@ -181,9 +192,9 @@ module SurrealDB
 
           log(:debug, 'Access token expiring; renewing it')
           if state.refresh_token
-            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
+            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session, timeout: timeout)
           else
-            send_request(*state.signin, session: session)
+            send_request(*state.signin, session: session, timeout: timeout)
           end
         end
       rescue ServerError => e

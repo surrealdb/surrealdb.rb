@@ -396,6 +396,40 @@ RSpec.describe SurrealDB::Client, '#with_timeout' do
     expect(other_connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('x')])
   end
 
+  context 'with requests the client sends straight to the connection' do
+    # Records the timeout each request reaches the transport with.
+    let(:connection) do
+      Class.new(SurrealDB::Connections::Base) do
+        attr_reader :timeouts
+
+        def initialize(url)
+          super
+          @timeouts = {}
+          @connected = true
+        end
+
+        protected
+
+        def execute(method, _params, timeout: nil, **)
+          @timeouts[method] = timeout
+          method == 'begin' ? SurrealDB::Uuid.v4 : nil
+        end
+      end.new('ws://localhost:8000')
+    end
+
+    before { allow(connection).to receive(:send_request).and_call_original }
+
+    it 'applies with_timeout to them too: version, sessions and the commit of a transaction' do
+      client.with_timeout(0.3) do
+        client.version
+        client.new_session.close
+        client.transaction { |tx| tx.query_raw('RETURN 1') }
+      end
+      expect(connection.timeouts).to include('version' => 0.3, 'attach' => 0.3, 'detach' => 0.3,
+                                             'begin' => 0.3, 'query' => 0.3, 'commit' => 0.3)
+    end
+  end
+
   it 'refuses a timeout that is not a positive number' do
     expect { client.with_timeout(0) { nil } }.to raise_error(ArgumentError)
     expect { client.with_timeout('5') { nil } }.to raise_error(ArgumentError)

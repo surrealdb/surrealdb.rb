@@ -101,7 +101,7 @@ module SurrealDB
 
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
         await_restore
-        deliver(method, params, session, txn, timeout)
+        deliver(method, params, session, txn, call_timeout(timeout))
       rescue RequestInterruptedError
         # Ending a lost transaction ends our record of it too.
         @state_mutex.synchronize { @transactions.delete(params[0].to_s) } if TXN_FINISH.include?(method)
