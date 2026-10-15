@@ -518,7 +518,19 @@ end
 
 # Per-connection timeouts: requests, and opening the connection (TCP + TLS + handshake)
 client = SurrealDB::Client.new("ws://localhost:8000", timeout: 10, connect_timeout: 5)
+client.connect
+client.signin("user" => "root", "pass" => "root")
+
+# Per-call timeouts: for one query, or for everything in a block
+client.query("SELECT * FROM person", timeout: 2)
+client.with_timeout(30) do
+  client.query("SLEEP 100ms")
+end
 ```
+
+A timeout is how long the client waits: the request raises `SurrealDB::TimeoutError`, but
+the server may still finish it. To stop a statement on the server, give it a `TIMEOUT`
+clause. Embedded connections use the engine's own query timeout instead.
 
 ## Contributing
 

@@ -19,6 +19,9 @@ module SurrealDB
     #   connection's default session)
     attr_reader :session
 
+    # @return [Connections::Base]
+    attr_reader :connection
+
     # @param connection [Connections::Base]
     # @param id [Uuid]
     # @param session [Uuid, nil]
@@ -71,10 +74,10 @@ module SurrealDB
       nil
     end
 
-    def rpc(method, params = [])
+    def rpc(method, params = [], timeout: nil)
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 
-      @connection.send_request(method, params, session: @session, txn: @id)
+      @connection.send_request(method, params, session: @session, txn: @id, **timeout_option(timeout))
     end
   end
 end

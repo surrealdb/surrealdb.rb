@@ -112,7 +112,7 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil, txn: nil)
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
         raise NotConnectedError, 'not connected' unless @connected
 
         id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
@@ -122,7 +122,7 @@ module SurrealDB
 
         begin
           write_frame(encoded)
-          wait_for_response(entry)
+          wait_for_response(entry, timeout || @timeout)
         ensure
           @mutex.synchronize { @pending.delete(id) }
         end
@@ -357,12 +357,12 @@ module SurrealDB
 
       # Waits for the reader thread to deliver a response into the entry,
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
-      def wait_for_response(entry)
+      def wait_for_response(entry, timeout)
         result = @mutex.synchronize do
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
           while entry[:result].nil?
             remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            raise TimeoutError, "request timed out after #{@timeout}s" if remaining <= 0
+            raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)
           end

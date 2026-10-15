@@ -63,6 +63,10 @@
 
 ### Added
 
+- Per-call timeouts: `query`, `query_raw` and `send_rpc` take `timeout:`, and
+  `with_timeout(seconds) { ... }` applies a timeout to every request in the block on that
+  connection, including its sessions and transactions.
+
 - `connect` checks the server version and raises `UnsupportedVersionError` unless it is
   at least 3.0.0 and below 5.0.0 (`version_check: false` skips the check);
   `Client#server_version` holds the reported version.

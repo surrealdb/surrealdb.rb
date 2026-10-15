@@ -278,3 +278,66 @@ RSpec.describe SurrealDB::Client, '#healthy?' do
     expect { client.health }.to raise_error(SurrealDB::ConnectionError)
   end
 end
+
+RSpec.describe SurrealDB::Client, '#with_timeout' do
+  let(:connection) do
+    instance_double(SurrealDB::Connections::WebSocket, supports_transactions?: true, supports_sessions?: true)
+  end
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before do
+    client.instance_variable_set(:@connection, connection)
+    allow(connection).to receive(:send_request).and_return([])
+  end
+
+  it 'passes a call timeout to the connection, and none otherwise' do
+    client.query('RETURN 1', timeout: 2)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 1'], timeout: 2)
+    client.query('RETURN 2')
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 2'])
+  end
+
+  it 'applies with_timeout to the block, innermost first, and restores it after' do
+    client.with_timeout(5) do
+      client.select('a')
+      client.with_timeout(1) { client.select('b') }
+      client.select('c')
+      client.query('RETURN 3', timeout: 9) # an explicit timeout wins
+    end
+    client.select('d')
+
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('a')], timeout: 5)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('b')], timeout: 1)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('c')], timeout: 5)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 3'], timeout: 9)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('d')])
+  end
+
+  it 'covers sessions and transactions on the same connection' do
+    allow(connection).to receive(:send_request).with('begin', [], any_args).and_return(SurrealDB::Uuid.v4)
+    session = client.new_session
+    tx = client.begin_transaction
+    client.with_timeout(3) do
+      session.select('s')
+      tx.select('t')
+    end
+    expect(connection).to have_received(:send_request)
+      .with('select', [SurrealDB::Table.new('s')], session: session.id, timeout: 3)
+    expect(connection).to have_received(:send_request)
+      .with('select', [SurrealDB::Table.new('t')], session: nil, txn: tx.id, timeout: 3)
+  end
+
+  it 'does not leak to other connections' do
+    other = described_class.new('ws://localhost:8000')
+    other_connection = instance_double(SurrealDB::Connections::WebSocket)
+    other.instance_variable_set(:@connection, other_connection)
+    allow(other_connection).to receive(:send_request).and_return([])
+    client.with_timeout(3) { other.select('x') }
+    expect(other_connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('x')])
+  end
+
+  it 'refuses a timeout that is not a positive number' do
+    expect { client.with_timeout(0) { nil } }.to raise_error(ArgumentError)
+    expect { client.with_timeout('5') { nil } }.to raise_error(ArgumentError)
+  end
+end

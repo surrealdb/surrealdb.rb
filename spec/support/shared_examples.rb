@@ -608,3 +608,47 @@ RSpec.shared_examples 'token refresh' do
     expect { user.refresh }.to raise_error(ArgumentError, /no refresh token/)
   end
 end
+
+RSpec.shared_examples 'call timeouts' do
+  after { client.close }
+
+  # Seconds the block took; it is expected to raise TimeoutError.
+  def seconds_to_time_out(&block)
+    start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    expect(&block).to raise_error(SurrealDB::TimeoutError)
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
+  end
+
+  it 'gives up on one call after its own timeout' do
+    expect(seconds_to_time_out { client.query('SLEEP 2s', timeout: 0.3) }).to be < 1.5
+    expect(client.query('RETURN 1')).to eq([1]) # the connection is still usable
+  end
+
+  it 'applies with_timeout to every call in the block, innermost first' do
+    client.with_timeout(5) do
+      expect(client.query('SLEEP 100ms; RETURN 2')[1]).to eq(2)
+      client.with_timeout(0.3) do
+        expect(seconds_to_time_out { client.query_raw('SLEEP 2s') }).to be < 1.5
+      end
+      expect(client.query('SLEEP 500ms; RETURN 3')[1]).to eq(3)
+    end
+  end
+
+  it 'applies with_timeout to sessions on the same connection' do
+    session = client.fork_session
+    client.with_timeout(0.3) do
+      expect(seconds_to_time_out { session.query('SLEEP 2s') }).to be < 1.5
+    end
+  ensure
+    session&.close
+  end
+
+  it 'lets a single call take longer than the connection timeout' do
+    quick = SurrealDB::Client.new(url, timeout: 0.3).connect
+    quick.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    expect { quick.query('SLEEP 1s') }.to raise_error(SurrealDB::TimeoutError)
+    expect(quick.query('SLEEP 1s; RETURN 4', timeout: 5)[1]).to eq(4)
+  ensure
+    quick&.close
+  end
+end

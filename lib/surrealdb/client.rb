@@ -159,9 +159,10 @@ module SurrealDB
     # server methods not yet wrapped by the SDK.
     # @param method [String] RPC method name
     # @param params [Array] method parameters
+    # @param timeout [Numeric, nil] seconds to wait for the response (see {#with_timeout})
     # @return [Object] decoded result
-    def send_rpc(method, params = [])
-      @connection.send_request(method, params)
+    def send_rpc(method, params = [], timeout: nil)
+      rpc(method, params, timeout: timeout)
     end
 
     private
@@ -176,8 +177,8 @@ module SurrealDB
       raise
     end
 
-    def rpc(method, params = [])
-      @connection.send_request(method, params)
+    def rpc(method, params = [], timeout: nil)
+      @connection.send_request(method, params, **timeout_option(timeout))
     end
 
     def request_session

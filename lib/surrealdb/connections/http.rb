@@ -69,7 +69,7 @@ module SurrealDB
         Protocol::Methods::REFRESH, Protocol::Methods::REVOKE
       ].freeze
 
-      def execute(method, params, session: nil, txn: nil)
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
         raise ConnectionError, 'not connected' unless @connected
 
         # Without an attached session every HTTP request runs in a fresh server
@@ -86,7 +86,7 @@ module SurrealDB
 
         request = build_request(encoded, session_state(session) || session_state,
                                 bearer: !CREDENTIAL_METHODS.include?(method))
-        response = execute_request(request)
+        response = with_read_timeout(timeout) { execute_request(request) }
 
         decoded = @rpc.decode_response(response.body)
         Protocol::Response.extract_result(decoded)
@@ -128,6 +128,17 @@ module SurrealDB
       # happens on a socket that already served a request, and the error
       # arrives before any response byte, which is the case where the server
       # dropped the request unread. Go's net/http retries the same case.
+      def with_read_timeout(timeout)
+        return yield if timeout.nil?
+
+        @http.read_timeout = timeout
+        begin
+          yield
+        ensure
+          @http.read_timeout = @timeout
+        end
+      end
+
       def execute_request(request)
         response = transport(request)
         HTTPEndpoint.raise_for(response, 'request') unless response.is_a?(Net::HTTPSuccess)

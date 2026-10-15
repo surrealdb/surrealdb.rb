@@ -82,7 +82,9 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil, txn: nil)
+      # A per-call timeout is not applied: the engine runs the request to its
+      # own query timeout.
+      def execute(method, params, session: nil, txn: nil, timeout: nil) # rubocop:disable Lint/UnusedMethodArgument
         raise ConnectionError, 'not connected' unless @connected
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)

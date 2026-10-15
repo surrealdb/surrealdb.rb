@@ -110,10 +110,12 @@ module SurrealDB
     #   db.query("RETURN 1; SELECT * FROM person") # => [1, [{...}, ...]]
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
+    # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
     # @return [Array] one result per statement
     # @raise [ServerError] when a statement fails
-    def query(sql, vars = {})
-      query_raw(sql, vars).map do |statement|
+    # @raise [TimeoutError] when the result does not arrive in time
+    def query(sql, vars = {}, timeout: nil)
+      query_raw(sql, vars, timeout: timeout).map do |statement|
         raise statement.to_error if statement.error?
 
         statement.result
@@ -126,11 +128,12 @@ module SurrealDB
     # statement fails.
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
+    # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
     # @return [Array<QueryResult>]
-    def query_raw(sql, vars = {})
+    def query_raw(sql, vars = {}, timeout: nil)
       params = [sql]
       params << vars unless vars.empty?
-      raw = rpc(Protocol::Methods::QUERY, params)
+      raw = rpc(Protocol::Methods::QUERY, params, timeout: timeout)
       Array(raw).map { |stmt| QueryResult.from_response(stmt) }
     end
 
@@ -143,7 +146,42 @@ module SurrealDB
       rpc(Protocol::Methods::RUN, [function_name, version, args])
     end
 
+    # Runs the block with a different response timeout for every request it
+    # makes on this connection, including through its sessions and
+    # transactions. Nested calls use the innermost timeout.
+    #
+    # The timeout is how long the client waits: a request that times out
+    # raises {TimeoutError}, but the server may still finish running it. To
+    # stop a statement on the server, give it a `TIMEOUT` clause. Embedded
+    # connections ignore it and use the engine's query timeout.
+    #
+    # @example
+    #   db.with_timeout(2) { db.select("person") }
+    # @param seconds [Numeric]
+    # @return [Object] the block's value
+    def with_timeout(seconds)
+      raise ArgumentError, "timeout must be positive, got #{seconds.inspect}" unless seconds.is_a?(Numeric) &&
+                                                                                     seconds.positive?
+
+      timeouts = (Thread.current[:surrealdb_call_timeouts] ||= {}.compare_by_identity)
+      previous = timeouts[connection]
+      timeouts[connection] = seconds
+      begin
+        yield
+      ensure
+        previous.nil? ? timeouts.delete(connection) : timeouts[connection] = previous
+      end
+    end
+
     private
+
+    # The `timeout:` option for a request: the one given for the call, else
+    # the one {#with_timeout} set for this connection in this fiber, else
+    # none (the connection's own timeout applies).
+    def timeout_option(timeout)
+      timeout ||= Thread.current[:surrealdb_call_timeouts]&.[](connection)
+      timeout ? { timeout: timeout } : {}
+    end
 
     # Table or record target for CRUD methods. Typed values are passed through
     # so the encoder sends them as CBOR tags 7 and 8. Strings are table names.

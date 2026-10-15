@@ -104,9 +104,9 @@ module SurrealDB
         @inner.attached_sessions
       end
 
-      def send_request(method, params = [], session: nil, txn: nil)
+      def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
         await_restore
-        deliver(method, params, session, txn)
+        deliver(method, params, session, txn, timeout)
       rescue RequestInterruptedError
         # Ending a lost transaction ends our record of it too.
         @state_mutex.synchronize { @transactions.delete(params[0].to_s) } if TXN_FINISH.include?(method)
@@ -138,28 +138,29 @@ module SurrealDB
       # Sends a request, reconnecting when the connection is gone: a request
       # that never left is sent on the new connection, one that was in flight
       # only when repeating it is harmless.
-      def deliver(method, params, session, txn)
+      def deliver(method, params, session, txn, timeout)
         transaction = txn || (params[0] if TXN_FINISH.include?(method))
         check_transaction_alive(transaction)
-        attempt(method, params, session, txn)
+        attempt(method, params, session, txn, timeout)
       rescue NotConnectedError
         ensure_connected!
         check_transaction_alive(transaction)
-        attempt(method, params, session, txn)
+        attempt(method, params, session, txn, timeout)
       rescue RequestInterruptedError
         raise
       rescue ConnectionError => e
         ensure_connected!
         raise_interrupted(method, e) unless txn.nil? && SAFE_TO_REPEAT.include?(method)
 
-        attempt(method, params, session, txn)
+        attempt(method, params, session, txn, timeout)
       end
 
       # Sends one request, translating live query ids the caller holds into
       # the ids they have on the current connection.
-      def attempt(method, params, session, txn)
+      def attempt(method, params, session, txn, timeout)
         params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
-        result = @inner.send_request(method, params, session: session, txn: txn)
+        result = @inner.send_request(method, params, session: session, txn: txn,
+                                                     **(timeout ? { timeout: timeout } : {}))
         track_live(method, params, session, result)
         result
       end
