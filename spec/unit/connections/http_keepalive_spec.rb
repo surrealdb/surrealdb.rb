@@ -22,6 +22,21 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  it 'leaves reconnecting to the next request, so a failed one does not also wait for a new socket' do
+    server = ScriptedHTTPServer.new(%i[drop ok])
+    http = http_to(server)
+    Timeout.timeout(5) do
+      expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
+      expect(http.instance_variable_get(:@http)).not_to be_started
+      expect(server.sockets).to eq(1)
+      expect(http.send_request('ping')).to eq('pong')
+      expect(server.sockets).to eq(2)
+    end
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'does not resend a write, which the server may already have run' do
     server = ScriptedHTTPServer.new(%i[ok drop ok])
     http = http_to(server)
