@@ -117,6 +117,18 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     expect(connection.calls).to eq(%w[signup refresh])
   end
 
+  it 'refuses the request when a token it cannot renew has expired' do
+    connection.next_expiry = Time.now + 3600
+    plain = connection.send(:token)
+    connection.send_request('authenticate', [plain]) # no refresh token, no sign-in to repeat
+    expect(connection.send_request('select', ['person'])).to eq('ok')
+    connection.next_expiry = Time.now - 1
+    connection.send_request('authenticate', [connection.send(:token)])
+    expect { connection.send_request('select', ['person']) }
+      .to raise_error(SurrealDB::AuthenticationError, /expired.*no refresh token.*'select' was not sent/)
+    expect(connection.calls).to eq(%w[authenticate select authenticate])
+  end
+
   it 'does not sign in again as a previous identity after a signup' do
     connection.next_expiry = Time.now + 3600
     connection.send_request('signin', [{ 'user' => 'root', 'pass' => 'root' }])
