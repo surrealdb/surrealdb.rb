@@ -64,6 +64,29 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
     expect(timeouts.values).to all(be_between(0.5, 0.7))
   end
 
+  it 'times out writing a body the server does not read' do
+    server = TCPServer.new('127.0.0.1', 0)
+    accepted = Thread.new { server.accept }
+    endpoint = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 0.3)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    expect { endpoint.request(:post, '/import', body: 'x' * 64_000_000) }
+      .to raise_error(SurrealDB::TimeoutError, %r{/import timed out}) { |e| expect(e).to be_sent }
+    expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 3
+  ensure
+    server&.close
+    accepted&.value&.close
+  end
+
+  it 'reports a request whose connection timed out as not sent' do
+    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil,
+                                      :write_timeout= => nil)
+    allow(Net::HTTP).to receive(:new).and_return(http)
+    allow(http).to receive(:start).and_raise(Net::OpenTimeout)
+    endpoint = described_class.new('http://db.example.com', timeout: 1)
+    expect { endpoint.request(:get, '/export') }
+      .to raise_error(SurrealDB::TimeoutError) { |e| expect(e).not_to be_sent }
+  end
+
   describe '.raise_for' do
     def response(code, body)
       klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)

@@ -57,7 +57,7 @@ module SurrealDB
       rescue BlockError => e
         raise e.original
       rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout => e
-        raise TimeoutError, "HTTP #{path} timed out: #{e.message}"
+        raise TimeoutError.new("HTTP #{path} timed out: #{e.message}", sent: sent_before?(e, body))
       rescue SystemCallError, IOError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"
       rescue Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => e
@@ -119,6 +119,13 @@ module SurrealDB
       private_class_method :error_message
 
       private
+
+      # Nothing reached the server when connecting timed out, nor when
+      # writing a request without a body did; an import applies its body as
+      # it arrives, so part of it may have run.
+      def sent_before?(timeout, body)
+        timeout.is_a?(Net::ReadTimeout) || (timeout.is_a?(Net::WriteTimeout) && !body.nil?)
+      end
 
       # Opening the connection used part of the time; writing the request and
       # reading the answer get what is left.
