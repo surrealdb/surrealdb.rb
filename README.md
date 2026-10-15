@@ -235,7 +235,7 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   fork.set("tenant", "acme")
   fork.close
 
-  db.sessions # => ids of the sessions attached on this connection (WebSocket only)
+  db.sessions # => ids of the sessions attached on this connection (not over HTTP)
 end
 ```
 

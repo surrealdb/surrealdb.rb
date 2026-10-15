@@ -33,6 +33,12 @@ module SurrealDB
       BEGIN_TXN       = 'begin'
       COMMIT          = 'commit'
       CANCEL          = 'cancel'
+
+      # Methods that can be sent again without changing anything when it is
+      # not known whether the first attempt ran.
+      SAFE_TO_REPEAT = [
+        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS, DETACH
+      ].freeze
     end
   end
 end
