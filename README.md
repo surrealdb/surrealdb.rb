@@ -520,6 +520,7 @@ end
 client = SurrealDB::Client.new("ws://localhost:8000", timeout: 10, connect_timeout: 5)
 client.connect
 client.signin("user" => "root", "pass" => "root")
+client.use("test", "test")
 
 # Per-call timeouts: for one query, or for everything in a block
 client.query("SELECT * FROM person", timeout: 2)
