@@ -80,7 +80,19 @@ RSpec.describe SurrealDB::RecordID do
       expect(described_class.parse('`a\\`b`:x').table).to eq('a`b')
       expect(described_class.parse("t:\u27E8\\u{41}\\t\u27E9").id).to eq("A\t")
       expect(described_class.parse("t:\u27E8a\\bb\u27E9").id).to eq("a\bb")
+      expect(described_class.parse("t:\u27E8\\u0041\\u27e9\u27E9").id).to eq("A\u27E9")
+      expect(described_class.parse('t:`a\\\'b\\"c`').id).to eq('a\'b"c')
       expect(described_class.new('t', "a\bb").to_s).to eq("t:\u27E8a\\u{8}b\u27E9")
+    end
+
+    it 'rejects an escape SurrealQL does not have, rather than dropping the backslash' do
+      ["t:\u27E8a\\qb\u27E9", 't:`a\\qb`', "t:\u27E8\\u41\u27E9", "t:\u27E8\\uD83D\u27E9"].each do |str|
+        expect { described_class.parse(str) }.to raise_error(ArgumentError, /escape/)
+      end
+    end
+
+    it 'writes a closing bracket in an identifier as a unicode escape, which SurrealDB 3 reads' do
+      expect(described_class.new('t', "a\u27E9b").to_s).to eq("t:\u27E8a\\u{27e9}b\u27E9")
     end
 
     it 'rejects a unicode escape that does not name a character' do
