@@ -82,7 +82,7 @@ RSpec.describe SurrealDB::RecordID do
     end
 
     it 'rejects a unicode escape that does not name a character' do
-      ['\\u{zz}', '\\u{}', '\\u{D800}', '\\u{110000}', '\\u{0000041}'].each do |escape|
+      ['\\u{zz}', '\\u{}', '\\u{D800}', '\\u{110000}', '\\u{0000041}', '\\u{41'].each do |escape|
         expect { described_class.parse("t:\u27E8#{escape}\u27E9") }.to raise_error(ArgumentError, /unicode escape/)
       end
     end

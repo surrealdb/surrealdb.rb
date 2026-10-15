@@ -323,6 +323,13 @@ RSpec.describe SurrealDB::Client, '#import' do
     expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /import's result/)
   end
 
+  it 'raises when a successful import answers with something other than statement results' do
+    [nil, 'ok', { 'status' => 'OK' }, [1]].each do |result|
+      allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode(result)))
+      expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /not a list/)
+    end
+  end
+
   it 'is fine with a successful import that reports no failures' do
     allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode([])))
     expect(client.import("OPTION IMPORT;\nCREATE x;")).to be_nil
