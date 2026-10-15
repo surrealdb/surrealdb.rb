@@ -121,6 +121,28 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  it 'opens the socket a stale one is replaced with within the time the call has left' do
+    server = ScriptedHTTPServer.new(%i[ok drop ok])
+    http = http_to(server)
+    net = http.instance_variable_get(:@http)
+    seen = nil
+    allow(net).to receive(:connect).and_wrap_original do |original|
+      seen = net.open_timeout
+      original.call
+    end
+    calls = 0
+    allow(net).to receive(:request).and_wrap_original do |original, *args|
+      sleep 0.4 if (calls += 1) == 2 # the stale socket takes its time to fail
+      original.call(*args)
+    end
+    http.send_request('ping')
+    expect(http.send_request('select', [SurrealDB::Table.new('person')], timeout: 1)).to eq('pong')
+    expect(seen).to be_between(0.4, 0.65)
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'raises ConnectionError when the next request cannot open a new socket' do
     server = ScriptedHTTPServer.new(%i[drop])
     http = http_to(server)

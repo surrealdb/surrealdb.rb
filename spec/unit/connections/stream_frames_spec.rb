@@ -33,6 +33,17 @@ RSpec.describe SurrealDB::Connections::StreamFrames do
   end
 end
 
+RSpec.describe SurrealDB::Connections::WebSocket, '#connect' do
+  it 'tries streaming again on a new connection, which may reach another server' do
+    connection = described_class.new('ws://localhost:8000')
+    connection.streaming_unavailable!
+    allow(connection).to receive(:open_socket).and_return(instance_double(TCPSocket, close: nil))
+    allow(connection).to receive_messages(send_upgrade: nil, wait_for_open: nil, start_reader: nil)
+    connection.connect
+    expect(connection).to be_supports_streaming
+  end
+end
+
 RSpec.describe SurrealDB::Connections::WebSocket, '#deliver_response' do
   let(:connection) { described_class.new('ws://localhost:8000', timeout: 0.1) }
   let(:frames) { SurrealDB::Connections::StreamFrames.new(1) }
@@ -95,9 +106,24 @@ RSpec.describe SurrealDB::Connections::WebSocket, '#execute_stream' do
       frame = SurrealDB::CBOR::Encoder.encode({ 'id' => id, 'result' => { 'stream' => 'begin' } })
       connection.send(:deliver_response, id, frame)
     end
-    allow(connection).to receive(:execute).and_raise(SurrealDB::NotAllowedError.new('Method not allowed'))
+    refused = SurrealDB::NotAllowedError.new('Method not allowed', code: -32_602)
+    allow(connection).to receive(:execute).and_raise(refused)
     expect(connection).to be_supports_streaming
     connection.send(:execute_stream, 'query_stream', ['SELECT 1']) { break }
     expect(connection).not_to be_supports_streaming
+  end
+
+  it 'keeps streaming when the stream it stops has just ended' do
+    connection.instance_variable_set(:@connected, true)
+    allow(connection).to receive(:write_frame) do
+      id = connection.instance_variable_get(:@streams).keys.first
+      frame = SurrealDB::CBOR::Encoder.encode({ 'id' => id, 'result' => { 'stream' => 'begin' } })
+      connection.send(:deliver_response, id, frame)
+    end
+    allow(connection).to receive(:execute).and_raise(
+      SurrealDB::ValidationError.new('No streaming query with this request id is in progress', code: -32_603)
+    )
+    connection.send(:execute_stream, 'query_stream', ['SELECT 1']) { break }
+    expect(connection).to be_supports_streaming
   end
 end

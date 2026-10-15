@@ -62,8 +62,9 @@ module SurrealDB
     end
 
     # Whether the connection dropped while the transaction was open, which
-    # ends it on the server: nothing in it was committed, unless a commit
-    # was in flight, in which case it is not known whether it took effect.
+    # ends it on the server, or a request through it timed out: nothing in
+    # it was committed, unless a commit was in flight, in which case it is
+    # not known whether it took effect.
     # @return [Boolean]
     def lost?
       @state == :lost

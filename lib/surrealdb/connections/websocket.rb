@@ -82,6 +82,7 @@ module SurrealDB
         end
 
         @connected = true
+        @streaming_unavailable = false # the new connection may reach another server
         start_reader
         log(:debug, "WebSocket connected to #{@url}")
       end
