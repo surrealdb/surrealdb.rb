@@ -11,7 +11,7 @@ module SurrealDB
     def initialize(name)
       raise ArgumentError, 'table name must be a non-empty string' if name.nil? || name.empty?
 
-      @name = name.freeze
+      @name = -name.to_s # a frozen copy: the caller keeps their string as it was
     end
 
     def to_s

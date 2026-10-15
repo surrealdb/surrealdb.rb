@@ -41,4 +41,18 @@ RSpec.describe SurrealDB::Connections::SessionState do
     value.first << 'x'
     expect(state.variables['v'].to_a).to eq([['a'], ['b']])
   end
+
+  it 'keeps the tokens and the namespace and database as they were, not the caller strings' do
+    token = +'token'
+    namespace = +'app'
+    state = described_class.new
+    state.track('authenticate', [token], nil)
+    state.track('use', [namespace, SurrealDB::NONE], nil)
+    pair = { 'access' => +'a1', 'refresh' => +'r1' }
+    other = described_class.new
+    other.track('signup', [{}], pair)
+    [token, namespace, pair['access'], pair['refresh']].each { |s| s << '-changed' }
+    expect([state.access_token, state.namespace]).to eq(%w[token app])
+    expect([other.access_token, other.refresh_token]).to eq(%w[a1 r1])
+  end
 end

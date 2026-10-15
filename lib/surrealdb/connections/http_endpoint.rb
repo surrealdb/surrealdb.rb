@@ -61,9 +61,11 @@ module SurrealDB
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"
       end
 
-      # An error the caller's block raised while reading a streamed body. It
-      # is carried past the transport rescues and re-raised unchanged, so a
-      # local failure (a full disk, say) is not reported as a network one.
+      # An error the caller's block raised while reading a streamed body, or
+      # the caller's IO raised while it was read for the request body. It is
+      # carried past the transport rescues and re-raised unchanged, so a
+      # local failure (a full disk, an unreadable file) is not reported as a
+      # network one, which a caller might retry.
       class BlockError < StandardError
         # @return [Exception]
         attr_reader :original
@@ -71,6 +73,20 @@ module SurrealDB
         def initialize(original)
           @original = original
           super(original.message)
+        end
+      end
+
+      # The caller's IO, as the request body: its own errors are wrapped in
+      # a {BlockError} so they reach the caller as they were raised.
+      class GuardedBody
+        def initialize(source)
+          @io = source
+        end
+
+        def read(*)
+          @io.read(*)
+        rescue StandardError => e
+          raise BlockError, e
         end
       end
 
@@ -118,7 +134,7 @@ module SurrealDB
 
       def attach_body(req, body)
         if body.respond_to?(:read)
-          req.body_stream = body
+          req.body_stream = GuardedBody.new(body)
           req['Transfer-Encoding'] = 'chunked' unless req['Content-Length']
         elsif body
           req.body = body
