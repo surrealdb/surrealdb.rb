@@ -19,11 +19,51 @@ module SurrealDB
     # --- Namespace / Database ---
 
     # Selects the namespace and database to use.
-    # @param namespace [String]
-    # @param database [String]
+    #
+    # Either can be left as it is or cleared: a String selects it, `nil`
+    # clears it, and {SurrealDB::NONE} (the default) leaves it unchanged.
+    # A database needs a namespace, so clearing the namespace clears the
+    # database too.
+    #
+    # @example
+    #   db.use("app", "prod")       # both
+    #   db.use("app")               # namespace only; the database is unchanged
+    #   db.use(database: "staging") # database only
+    #   db.use(database: nil)       # clear the database
+    #   db.use(namespace: nil)      # clear both
+    # @param ns [String, nil, None] namespace
+    # @param db [String, nil, None] database
+    # @param namespace [String, nil, None] namespace, as a keyword
+    # @param database [String, nil, None] database, as a keyword
+    # @return [Hash{String => String, nil}] the resulting "namespace" and "database"
+    # @raise [ArgumentError] when clearing the namespace but selecting a database
+    def use(ns = NONE, db = NONE, namespace: ns, database: db)
+      if namespace.nil?
+        raise ArgumentError, 'cannot select a database without a namespace' if database.is_a?(String)
+
+        database = nil
+      end
+      result = rpc(Protocol::Methods::USE, [namespace, database])
+      state = request_state
+      { 'namespace' => state&.namespace, 'database' => state&.database }.tap do |current|
+        next unless result.is_a?(Hash)
+
+        current['namespace'] = present(result['namespace'])
+        current['database'] = present(result['database'])
+      end
+    end
+
+    # Resets the session to how it was when it was opened: signs out, clears
+    # the namespace, database and variables, kills its live queries and
+    # cancels its open transactions.
     # @return [void]
-    def use(namespace, database)
-      rpc(Protocol::Methods::USE, [namespace, database])
+    def reset
+      rpc(Protocol::Methods::RESET, [])
+      live_query_ids.each { |id| connection.remove_notification_handler(id) }
+      live_query_ids.clear
+      open_transactions.each { |txn| txn.send(:discard) }
+      open_transactions.clear
+      nil
     end
 
     # --- Authentication ---
@@ -81,7 +121,7 @@ module SurrealDB
     # @return [String] live query UUID
     def live(resource, diff: false)
       require_live_queries!
-      rpc(Protocol::Methods::LIVE, [table_param(resource), diff])
+      rpc(Protocol::Methods::LIVE, [table_param(resource), diff]).tap { |id| live_query_ids << id.to_s }
     end
 
     # Subscribes to live query notifications.
@@ -90,6 +130,9 @@ module SurrealDB
     # @return [void]
     def subscribe(live_query_id, &block)
       require_live_queries!
+      # An id from a LIVE SELECT statement or send_rpc is not in the list
+      # yet; {#reset} removes its handler too.
+      live_query_ids << live_query_id.to_s unless live_query_ids.include?(live_query_id.to_s)
       connection.on_notification(live_query_id.to_s, block)
     end
 
@@ -99,6 +142,7 @@ module SurrealDB
     def kill(live_query_id)
       require_live_queries!
       connection.remove_notification_handler(live_query_id.to_s)
+      live_query_ids.delete(live_query_id.to_s)
       rpc(Protocol::Methods::KILL, [live_query_id])
     end
 
@@ -122,6 +166,7 @@ module SurrealDB
       require_transactions!
       id = rpc(Protocol::Methods::BEGIN_TXN)
       txn = Transaction.new(connection, id, session: request_session)
+      open_transactions.keep_if(&:open?) << txn
       return txn unless block_given?
 
       run_transaction(txn) { yield txn }
@@ -226,6 +271,25 @@ module SurrealDB
     end
 
     private
+
+    # Live queries started with {#live} in this session, which {#reset} kills.
+    def live_query_ids
+      @live_query_ids ||= []
+    end
+
+    # Transactions begun in this session that may still be open, which
+    # {#reset} cancels.
+    def open_transactions
+      @open_transactions ||= []
+    end
+
+    def present(value)
+      value.is_a?(None) ? nil : value
+    end
+
+    def request_state
+      connection.session_state(request_session)
+    end
 
     # Servers from 3.1 answer a failed import with 422 and only the failed
     # statements; older ones answer 200 with every statement's result. Both

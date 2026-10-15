@@ -60,6 +60,25 @@ module SurrealDB
       @connection.send_request(Protocol::Methods::VERSION)
     end
 
+    # Checks that the server is up and its storage reachable, through its
+    # HTTP /health route (for embedded connections: that the engine is open).
+    # @return [void]
+    # @raise [ServerError] when the server reports itself unhealthy
+    # @raise [ConnectionError] when it cannot be reached
+    def health
+      @connection.health
+      nil
+    end
+
+    # Like {#health}, but answers true or false instead of raising.
+    # @return [Boolean]
+    def healthy?
+      health
+      true
+    rescue Error
+      false
+    end
+
     # --- Sessions ---
 
     # Attaches a new server session on this connection.

@@ -317,6 +317,48 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe 'reset' do
+    it 'forgets the live queries the server killed with the session' do
+      reliable.send_request('live', ['person'])
+      reliable.send_request('reset')
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+      expect(methods_sent).not_to include('live')
+    end
+
+    it 'removes the handlers of the live queries it killed, also after a reconnect' do
+      original = reliable.send_request('live', ['person'])
+      other = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: other)
+      kept = reliable.send_request('live', ['person'], session: other)
+      [original, kept].each { |id| reliable.on_notification(id, proc {}) }
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version') # reconnects; the live queries get new ids
+      reliable.send_request('reset')
+      expect(inner.handlers.size).to eq(1)
+    end
+
+    it 'forgets the transactions of the session it reset, but not those of others' do
+      other = SurrealDB::Uuid.v4
+      reliable.send_request('begin', [])
+      allow(inner).to receive(:execute).and_wrap_original do |execute, method, *args, **options|
+        method == 'begin' ? SurrealDB::Uuid.v4 : execute.call(method, *args, **options)
+      end
+      kept = reliable.send_request('begin', [], session: other)
+      reliable.send_request('reset')
+      expect(reliable.instance_variable_get(:@transactions).keys).to eq([kept.to_s])
+      reliable.send_request('detach', [], session: other)
+      expect(reliable.instance_variable_get(:@transactions)).to be_empty
+    end
+
+    it 'is repeated when it was in flight' do
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      expect(reliable.send_request('reset')).to eq('ok')
+      expect(methods_sent.count('reset')).to eq(2)
+    end
+  end
+
   describe 'a handler registered while a reconnect restores its live query' do
     it 'receives the notifications of the restored query' do
       original = reliable.send_request('live', ['person'])

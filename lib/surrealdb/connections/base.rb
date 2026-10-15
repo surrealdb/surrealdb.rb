@@ -74,6 +74,17 @@ module SurrealDB
         @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
       end
 
+      # Asks the server's HTTP /health route whether it is up and its storage
+      # is reachable.
+      # @return [void]
+      # @raise [ServerError] when the server reports itself unhealthy
+      # @raise [ConnectionError] when it cannot be reached
+      def health
+        response = http_endpoint.request(:get, '/health')
+        HTTPEndpoint.raise_for(response, 'health check') unless response.is_a?(Net::HTTPSuccess)
+        nil
+      end
+
       # Sends a request to one of the server's HTTP routes (/import, /export)
       # with a session's namespace, database and credentials. Like RPC
       # requests, it is refused once the connection, or the session, has been

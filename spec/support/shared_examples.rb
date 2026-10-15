@@ -487,3 +487,52 @@ RSpec.shared_examples 'session variables' do
     expect(value_of('RETURN $rid')).to eq(SurrealDB::RecordID.new('user', ['a']))
   end
 end
+
+RSpec.shared_examples 'session lifecycle' do
+  after { client.close }
+
+  let(:ns) { SurrealHelper::SURREAL_NS }
+  let(:db) { SurrealHelper::SURREAL_DB }
+
+  def where_am_i
+    client.query('RETURN [session::ns(), session::db()]')[0]
+  end
+
+  it 'returns the namespace and database from use' do
+    expect(client.use(ns, 'lifecycle_a')).to eq({ 'namespace' => ns, 'database' => 'lifecycle_a' })
+    expect(where_am_i).to eq([ns, 'lifecycle_a'])
+  end
+
+  it 'changes only the namespace or only the database' do
+    client.use(ns, 'lifecycle_a')
+    expect(client.use(database: 'lifecycle_b')).to eq({ 'namespace' => ns, 'database' => 'lifecycle_b' })
+    expect(where_am_i).to eq([ns, 'lifecycle_b'])
+
+    expect(client.use("#{ns}_other")).to eq({ 'namespace' => "#{ns}_other", 'database' => 'lifecycle_b' })
+    expect(where_am_i).to eq(["#{ns}_other", 'lifecycle_b'])
+  end
+
+  it 'clears the database with nil' do
+    expect(client.use(database: nil)).to eq({ 'namespace' => ns, 'database' => nil })
+    expect(where_am_i).to eq([ns, SurrealDB::NONE])
+    client.use(database: db) # and a later use selects it again
+    expect(where_am_i).to eq([ns, db])
+  end
+
+  it 'resets the session: signed out, nothing selected, no variables' do
+    client.set('kept', 1)
+    client.reset
+
+    expect(where_am_i).to eq([SurrealDB::NONE, SurrealDB::NONE])
+    expect { client.query('INFO FOR ROOT') }.to raise_error(SurrealDB::NotAllowedError)
+
+    client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    client.use(ns, db)
+    expect(client.query('RETURN [session::ns(), session::db(), $kept]')[0]).to eq([ns, db, SurrealDB::NONE])
+  end
+
+  it 'reports the server healthy' do
+    expect { client.health }.not_to raise_error
+    expect(client.healthy?).to be(true)
+  end
+end

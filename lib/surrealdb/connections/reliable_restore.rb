@@ -1,0 +1,80 @@
+# frozen_string_literal: true
+
+module SurrealDB
+  module Connections
+    # What {ReliableWebSocket} brings back after a reconnect: every session
+    # with its namespace, database, variables and credentials, and every
+    # live query started with `live`.
+    module ReliableRestore
+      private
+
+      # One session failing to restore does not stop the others.
+      def restore_sessions
+        begin
+          restore_session(nil, @inner.session_state(nil))
+        rescue ServerError => e
+          log(:error, "Could not restore the default session: #{e.message}")
+        end
+        @inner.attached_sessions.each do |id, state|
+          @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
+          restore_session(id, state)
+        rescue ServerError => e
+          log(:error, "Could not restore session #{id}: #{e.message}")
+        end
+      end
+
+      def restore_session(id, state)
+        state = state.copy
+        restore_auth(id, state)
+        @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id) if
+          state.namespace || state.database
+        state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
+      end
+
+      # Re-presents the token; when the server no longer accepts it (it
+      # expired while we were away), signs in again with the credentials the
+      # session last signed in with. A signup is never repeated. A session
+      # that cannot authenticate again is left signed out, and the rest of
+      # its state is still restored.
+      def restore_auth(id, state)
+        return unless state.access_token
+
+        @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
+      rescue ServerError => e
+        state.signin ? sign_in_again(id, state, e) : drop_auth(id, e)
+      end
+
+      def sign_in_again(id, state, error)
+        log(:info, "Stored token rejected after reconnect (#{error.message}); signing in again")
+        @inner.send_request(*state.signin, session: id)
+      rescue ServerError => e
+        drop_auth(id, e)
+      end
+
+      # Forgets the credentials, so the session state says what the server
+      # now has: an unauthenticated session.
+      def drop_auth(id, error)
+        log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
+                   "reconnecting (#{error.message}); it is now signed out")
+        @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
+      end
+
+      # The handler is read once the fresh id is in place: one registered
+      # meanwhile went under the old id, whose handler is dropped.
+      def restore_live_queries
+        lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
+        lives.each do |key, live|
+          fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
+          handler = @state_mutex.synchronize do
+            @lives[key][:current] = fresh if @lives.key?(key)
+            @lives.dig(key, :handler)
+          end
+          @inner.remove_notification_handler(live[:current].to_s)
+          @inner.on_notification(fresh.to_s, relabel(key, handler)) if handler
+        rescue ServerError => e
+          log(:error, "Could not restore live query #{key}: #{e.message}")
+        end
+      end
+    end
+  end
+end

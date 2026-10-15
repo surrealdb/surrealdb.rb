@@ -24,6 +24,8 @@ module SurrealDB
     # Live queries started by a LIVE SELECT statement inside {#query} are not
     # tracked and are not restored.
     class ReliableWebSocket < Base
+      include ReliableRestore
+
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
       # How long a restore waits for requests whose response already arrived
@@ -51,7 +53,7 @@ module SurrealDB
         # Live queries started with `live`, by the id the caller was given:
         # { params:, session:, current: id on the current connection, handler: }
         @lives = {}
-        # Transactions, by id, with the connection generation they began on.
+        # Transactions, by id: [connection generation they began on, session].
         @generation = 0
         @transactions = {}
         # Requests between sending and recording their result.
@@ -85,16 +87,16 @@ module SurrealDB
         @inner.connected? && !@restoring
       end
 
-      def supports_live_queries?
-        true
-      end
+      def supports_live_queries? = true
 
-      def supports_transactions?
-        true
-      end
+      def supports_transactions? = true
 
       def http_endpoint
         @inner.http_endpoint
+      end
+
+      def health
+        @inner.health
       end
 
       def session_state(session = nil)
@@ -161,15 +163,13 @@ module SurrealDB
       # Sends one request, translating live query ids the caller holds into
       # the ids they have on the current connection.
       def attempt(method, params, session, txn)
-        params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
         @state_mutex.synchronize { @delivering += 1 }
-        begin
-          result = @inner.send_request(method, params, session: session, txn: txn)
-          track_live(method, params, session, result)
-        ensure
-          @state_mutex.synchronize { @delivered.broadcast if (@delivering -= 1).zero? }
-        end
+        params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
+        result = @inner.send_request(method, params, session: session, txn: txn)
+        track_live(method, params, session, result)
         result
+      ensure
+        @state_mutex.synchronize { @delivered.broadcast if (@delivering -= 1).zero? }
       end
 
       # A response can arrive just before the connection drops, and the
@@ -179,30 +179,33 @@ module SurrealDB
       # fail with the old connection; those made on the new one meanwhile
       # are waited for only up to DELIVERY_WAIT.
       def await_deliveries
-        clock = Process::CLOCK_MONOTONIC
-        deadline = Process.clock_gettime(clock) + DELIVERY_WAIT
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DELIVERY_WAIT
         @state_mutex.synchronize do
-          while @delivering.positive?
-            left = deadline - Process.clock_gettime(clock)
-            break unless left.positive?
-
+          while @delivering.positive? && (left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)).positive?
             @delivered.wait(@state_mutex, left)
           end
         end
       end
 
-      def track_live(method, params, session, result) # rubocop:disable Metrics/CyclomaticComplexity
+      def track_live(method, params, session, result)
+        track_transaction(method, params, session, result)
         case method
-        when Protocol::Methods::BEGIN_TXN
-          @state_mutex.synchronize { @transactions[result.to_s] = @generation }
-        when *TXN_FINISH
-          @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         when Protocol::Methods::LIVE
           @state_mutex.synchronize { @lives[result.to_s] = { params: params, session: session, current: result } }
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
-        when Protocol::Methods::DETACH then forget_lives(session) if session
+        when Protocol::Methods::RESET then forget_session(session)
+        when Protocol::Methods::DETACH then forget_session(session) if session
+        end
+      end
+
+      def track_transaction(method, params, session, result)
+        case method
+        when Protocol::Methods::BEGIN_TXN
+          @state_mutex.synchronize { @transactions[result.to_s] = [@generation, session] }
+        when *TXN_FINISH
+          @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
       end
 
@@ -218,9 +221,9 @@ module SurrealDB
 
       # A live query ends with the connection it was started on, so a kill
       # the connection dropped under has done its job either way, as long as
-      # the reconnect does not start the live query again.
-      # A reconnect another thread made after the drop may already have
-      # started the live query again; it is killed there.
+      # the reconnect does not start the live query again. A reconnect
+      # another thread made after the drop may already have started the live
+      # query again; it is killed there.
       def kill_lost(id)
         restored = @reconnect_mutex.synchronize do
           live = @state_mutex.synchronize { @lives.delete(id.to_s) }
@@ -238,7 +241,7 @@ module SurrealDB
       def detach_lost(session)
         restored = @reconnect_mutex.synchronize do
           @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
-          forget_lives(session)
+          forget_session(session)
           @inner.connected?
         end
         end_again(Protocol::Methods::DETACH, [], session) if restored
@@ -252,13 +255,18 @@ module SurrealDB
         log(:warn, "Could not #{method} on the new connection what the dropped one ended: #{e.message}")
       end
 
-      # The session's live queries ended with it on the server; drop them and
+      # The server ended the session's live queries (reset, detach); drop them and
       # their handlers, which would otherwise never run again but stay
       # reachable, and would be restored into a session that no longer exists.
+      # A reset or a detach ends the session's live queries and transactions.
+      def forget_session(session)
+        @state_mutex.synchronize { @transactions.delete_if { |_, (_, owner)| owner == session } }
+        forget_lives(session)
+      end
+
       def forget_lives(session)
         gone = @state_mutex.synchronize do
-          keys = @lives.select { |_, live| live[:session] == session }.keys
-          keys.map { |key| @lives.delete(key) }
+          @lives.select { |_, live| live[:session] == session }.keys.map { |key| @lives.delete(key) }
         end
         gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
@@ -269,7 +277,7 @@ module SurrealDB
       def check_transaction_alive(txn)
         return if txn.nil?
 
-        began = @state_mutex.synchronize { @transactions[txn.to_s] }
+        began = @state_mutex.synchronize { @transactions[txn.to_s]&.first }
         return if began.nil? || began == @generation
 
         raise RequestInterruptedError,
@@ -370,77 +378,6 @@ module SurrealDB
       rescue ConnectionError => e
         log(:warn, "Reconnection attempt #{attempt} failed: #{e.message}")
         false
-      end
-
-      # One session failing to restore does not stop the others.
-      def restore_sessions
-        begin
-          restore_session(nil, @inner.session_state(nil))
-        rescue ServerError => e
-          log(:error, "Could not restore the default session: #{e.message}")
-        end
-        @inner.attached_sessions.each do |id, state|
-          @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
-          restore_session(id, state)
-        rescue ServerError => e
-          log(:error, "Could not restore session #{id}: #{e.message}")
-        end
-      end
-
-      def restore_session(id, state)
-        state = state.copy
-        restore_auth(id, state)
-        @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id) if
-          state.namespace || state.database
-        state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
-      end
-
-      # Re-presents the token; when the server no longer accepts it (it
-      # expired while we were away), signs in again with the credentials the
-      # session last signed in with. A signup is never repeated. A session
-      # that cannot authenticate again is left signed out, and the rest of
-      # its state is still restored.
-      def restore_auth(id, state)
-        return unless state.access_token
-
-        @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
-      rescue ServerError => e
-        state.signin ? sign_in_again(id, state, e) : drop_auth(id, e)
-      end
-
-      def sign_in_again(id, state, error)
-        log(:info, "Stored token rejected after reconnect (#{error.message}); signing in again")
-        @inner.send_request(*state.signin, session: id)
-      rescue ServerError => e
-        drop_auth(id, e)
-      end
-
-      # Forgets the credentials, so the session state says what the server
-      # now has: an unauthenticated session.
-      def drop_auth(id, error)
-        log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
-                   "reconnecting (#{error.message}); it is now signed out")
-        @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
-      end
-
-      # The handler is read again once the fresh id is in place: one
-      # registered meanwhile went under the old id, which is dropped.
-      def restore_live_queries
-        lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
-        lives.each do |key, live|
-          @inner.remove_notification_handler(live[:current].to_s)
-          fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          handler = @state_mutex.synchronize do
-            next unless @lives.key?(key)
-
-            @lives[key][:current] = fresh
-            @lives[key][:handler]
-          end
-          @inner.remove_notification_handler(live[:current].to_s)
-          @inner.on_notification(fresh.to_s, relabel(key, handler)) if handler
-        rescue ServerError => e
-          log(:error, "Could not restore live query #{key}: #{e.message}")
-        end
       end
     end
   end

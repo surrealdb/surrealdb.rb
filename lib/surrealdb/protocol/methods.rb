@@ -11,6 +11,7 @@ module SurrealDB
       SIGNUP          = 'signup'
       AUTHENTICATE    = 'authenticate'
       INVALIDATE      = 'invalidate'
+      RESET           = 'reset'
       LET             = 'let'
       UNSET           = 'unset'
       LIVE            = 'live'
@@ -38,7 +39,7 @@ module SurrealDB
       # not known whether the first attempt ran. (Not DETACH: run twice, the
       # second finds no session and fails.)
       SAFE_TO_REPEAT = [
-        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS
+        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS, RESET
       ].freeze
     end
   end
