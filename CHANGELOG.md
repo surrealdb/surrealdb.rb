@@ -38,6 +38,17 @@
   permanently disconnected, and an HTTP 401 is reported as `NotAllowedError` with the
   server's message instead of a bare `ConnectionError`.
 
+- Reconnection repeated requests that may already have run, and lost the rest of the
+  session. A dropped request was retried whatever it was, so a `create` or `query` in flight
+  could run twice; attached sessions, live queries and transactions were not considered at
+  all. Now a request that was never sent is sent once the connection is back, one that was
+  in flight is repeated only when that is harmless (reads, `use`, variables, `authenticate`)
+  and otherwise raises `RequestInterruptedError`, and a transaction is never resumed on the
+  new connection. Every attached session is restored with its own state, an expired token
+  falls back to the last `signin` (a `signup` is never repeated), and live queries started
+  with `live` are issued again and keep delivering under the id the caller holds. The
+  reconnect starts as soon as the drop is noticed.
+
 ### Added
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)
@@ -53,6 +64,7 @@
 
 ### Changed
 
+- WebSocket connections reconnect by default; pass `reconnect: false` to opt out.
 - **Breaking:** `begin_transaction` returns a `Transaction`; `Client#commit`/`#cancel` take
   the transaction (or its id).
 - **Breaking:** `Client#attach` returns a `Session` instead of the raw server result, and

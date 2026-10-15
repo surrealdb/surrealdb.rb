@@ -3,6 +3,7 @@
 module SurrealDB
   module Protocol
     module Methods
+      PING            = 'ping'
       USE             = 'use'
       INFO            = 'info'
       VERSION         = 'version'

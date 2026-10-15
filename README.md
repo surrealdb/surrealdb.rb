@@ -315,22 +315,42 @@ Requires `libsurrealdb_c` installed on the system or pointed to via `SURREALDB_L
 
 ## Automatic Reconnection
 
-Enable automatic WebSocket reconnection with exponential backoff:
+WebSocket connections reconnect automatically, with exponential backoff, as soon as a
+dropped connection is noticed. Pass `reconnect: false` to turn this off.
 
 ```ruby
 client = SurrealDB::Client.new("ws://localhost:8000",
-  reconnect: true,
-  reconnect_max_retries: 5,
-  reconnect_delay: 1.0
+  reconnect_max_retries: 5, # attempts before giving up
+  reconnect_delay: 1.0      # base delay between attempts, doubled each time
 )
 client.connect
 client.signin("user" => "root", "pass" => "root")
 client.use("test", "test")
-
-# If the connection drops, the SDK will automatically reconnect,
-# replay use/signin/let state, and retry the failed request.
-client.query("SELECT * FROM person")
 ```
+
+After reconnecting, the SDK restores what the server lost with the connection:
+
+- the namespace, database, variables and credentials of the default session and of every
+  attached session (an expired token falls back to the last `signin`; a `signup` is never
+  repeated);
+- live queries started with `live`, which keep delivering under the id you were given.
+
+A request that was never sent is sent once the connection is back. A request that was in
+flight when the connection dropped may already have run, so only harmless ones (reads,
+`use`, variables, `authenticate`) are sent again; anything else raises
+`SurrealDB::RequestInterruptedError`, and you decide whether to retry it:
+
+```ruby
+begin
+  client.create("person", { "name" => "Alice" })
+rescue SurrealDB::RequestInterruptedError
+  # The connection is back, but the create may or may not have happened.
+end
+```
+
+Transactions do not survive a reconnect: any further request in one raises
+`RequestInterruptedError`, and nothing in it was committed. Live queries started by a
+`LIVE SELECT` statement inside `query` are not restored.
 
 ## Live Queries
 

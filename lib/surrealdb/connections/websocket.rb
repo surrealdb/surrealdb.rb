@@ -45,6 +45,14 @@ module SurrealDB
         @socket = nil
         @driver = nil
         @reader_thread = nil
+        @on_disconnect = nil
+      end
+
+      # Registers a callback run (on its own thread) when the connection is
+      # lost without {#close} having been called.
+      # @yield [String] why the connection was lost
+      def on_disconnect(&block)
+        @on_disconnect = block
       end
 
       # Opens the connection. The TCP connect, the TLS handshake and the
@@ -75,16 +83,14 @@ module SurrealDB
       end
 
       def close
-        return unless @connected
-
+        was_connected = @connected
         @connected = false
-        @driver&.close
+        @driver&.close if was_connected
+        close_socket # unblocks the reader, which is waiting in readpartial
         shutdown_reader
-        @socket&.close
-        @socket = nil
 
         notify_pending_closed
-        log(:debug, 'WebSocket connection closed')
+        log(:debug, 'WebSocket connection closed') if was_connected
       end
 
       def supports_live_queries?
@@ -107,7 +113,7 @@ module SurrealDB
       protected
 
       def execute(method, params, session: nil, txn: nil)
-        raise ConnectionError, 'not connected' unless @connected
+        raise NotConnectedError, 'not connected' unless @connected
 
         id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
         entry = { result: nil, cv: ConditionVariable.new }
@@ -115,7 +121,7 @@ module SurrealDB
         @mutex.synchronize { @pending[id] = entry }
 
         begin
-          @write_mutex.synchronize { @driver.binary(encoded) }
+          write_frame(encoded)
           wait_for_response(entry)
         ensure
           @mutex.synchronize { @pending.delete(id) }
@@ -205,8 +211,7 @@ module SurrealDB
         end
 
         @driver.on :close do
-          @connected = false
-          notify_pending_closed
+          connection_lost('closed by the server')
         end
       end
 
@@ -249,20 +254,41 @@ module SurrealDB
         while @connected
           data = read_socket
           if data.nil? || data.empty?
-            @connected = false
-            notify_pending_closed
+            connection_lost('closed by the peer')
             break
           end
           @driver.parse(data)
         end
-      rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError => e
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}") if @connected
+        connection_lost("#{e.class}: #{e.message}")
+      end
+
+      # Marks the connection dead, fails the requests waiting on it, and tells
+      # whoever asked (see {#on_disconnect}). Does nothing after {#close}.
+      def connection_lost(reason)
+        return unless @connected
+
         @connected = false
+        close_socket
         notify_pending_closed
-        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}")
+        callback = @on_disconnect
+        Thread.new { callback.call(reason) } if callback
+      end
+
+      def close_socket
+        @socket&.close
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        @socket = nil
       end
 
       def read_socket
-        @socket.readpartial(16_384)
+        socket = @socket
+        return nil unless socket
+
+        socket.readpartial(16_384)
       rescue EOFError
         nil
       end
@@ -309,9 +335,12 @@ module SurrealDB
       end
 
       def shutdown_reader
-        @reader_thread&.join(2)
-        @reader_thread&.kill if @reader_thread&.alive?
+        thread = @reader_thread
         @reader_thread = nil
+        return if thread.nil? || thread == Thread.current
+
+        thread.join(2)
+        thread.kill if thread.alive?
       end
 
       # Signals :closed on every pending request so blocked callers
@@ -344,6 +373,15 @@ module SurrealDB
 
         response = @rpc.decode_response(result)
         Protocol::Response.extract_result(response)
+      end
+
+      # A frame the socket refused was not sent, so the request is safe to
+      # send again: report it as NotConnectedError, not as an interruption.
+      def write_frame(encoded)
+        @write_mutex.synchronize { @driver.binary(encoded) }
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        connection_lost("write failed: #{e.class}: #{e.message}")
+        raise NotConnectedError, "not connected (#{e.message})"
       end
 
       # Minimal wrapper that gives websocket-driver the interface it expects:
