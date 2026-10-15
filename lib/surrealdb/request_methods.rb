@@ -10,6 +10,9 @@ module SurrealDB
   module RequestMethods
     include QueryMethods
 
+    # Keeps at most this many import failures on an {ImportError}.
+    KEPT_IMPORT_FAILURES = 100
+
     # --- Namespace / Database ---
 
     # Selects the namespace and database to use.
@@ -142,6 +145,60 @@ module SurrealDB
       nil
     end
 
+    # --- Import / Export ---
+
+    # Imports SurrealQL into the current namespace and database, through the
+    # server's HTTP /import route (there is no RPC method for it). Runs with
+    # this session's namespace, database and credentials.
+    #
+    # The content must start with `OPTION IMPORT;`, as exports do; the server
+    # refuses anything else. An import is not atomic: statements before a
+    # failure stay applied.
+    #
+    # @param content [String, IO] SurrealQL, or an IO to stream it from
+    # @return [void]
+    # @raise [ImportError] if any statement failed
+    # @raise [ServerError] if the server refused the import
+    def import(content)
+      response = connection.http_endpoint.request(
+        :post, '/import',
+        body: content,
+        headers: { 'Content-Type' => 'text/plain', 'Accept' => 'application/cbor' },
+        state: connection.session_state(request_session)
+      )
+      raise_import_failures(response)
+      nil
+    end
+    alias import_data import
+
+    # Exports the current database as SurrealQL, through the server's HTTP
+    # /export route. Runs with this session's namespace, database and
+    # credentials.
+    #
+    # Options select what is exported, e.g. `tables: ["person"]`,
+    # `records: false`, `users: false`, `versions: true`. Omitted options
+    # take the server's defaults.
+    #
+    # @param options [Hash] export configuration
+    # @yield [String] chunks of the export as they arrive, when given
+    # @return [String, nil] the export, or nil when streamed to a block
+    def export(**options, &block)
+      verb, body, headers = if options.empty?
+                              [:get, nil, {}]
+                            else
+                              [:post, ::CBOR.encode(CBOR::Encoder.prepare(options.transform_keys(&:to_s))),
+                               { 'Content-Type' => 'application/cbor' }]
+                            end
+      response = connection.http_endpoint.request(
+        verb, '/export',
+        body: body, headers: headers.merge('Accept' => 'text/plain'),
+        state: connection.session_state(request_session), &block
+      )
+      Connections::HTTPEndpoint.raise_for(response, 'export') unless response.is_a?(Net::HTTPSuccess)
+      block ? nil : response.body.to_s.dup.force_encoding(Encoding::UTF_8)
+    end
+    alias export_data export
+
     # --- Info ---
 
     # Returns info about the current session.
@@ -151,6 +208,27 @@ module SurrealDB
     end
 
     private
+
+    # Servers from 3.1 answer a failed import with 422 and only the failed
+    # statements; older ones answer 200 with every statement's result. Both
+    # are read the same way: whatever came back with status ERR failed.
+    def raise_import_failures(response)
+      ok = response.is_a?(Net::HTTPSuccess)
+      return Connections::HTTPEndpoint.raise_for(response, 'import') unless ok || response.code == '422'
+
+      failures = import_failures(response.body.to_s)
+      if failures.any?
+        errors = failures.first(KEPT_IMPORT_FAILURES).map { |f| QueryResult.from_response(f).to_error }
+        raise ImportError.new(errors, failures.length)
+      end
+      Connections::HTTPEndpoint.raise_for(response, 'import') unless ok
+    end
+
+    def import_failures(body)
+      Array(CBOR::Decoder.decode(body)).select { |r| r.is_a?(Hash) && r['status'] == 'ERR' }
+    rescue StandardError
+      []
+    end
 
     def run_transaction(txn)
       result = yield

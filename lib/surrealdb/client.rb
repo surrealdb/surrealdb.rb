@@ -47,21 +47,6 @@ module SurrealDB
       @connection.connected?
     end
 
-    # --- Import / Export ---
-
-    # Imports SurrealQL data or ML model data into the database.
-    # @param content [String] SurrealQL or ML content to import
-    # @return [Object]
-    def import_data(content)
-      @connection.send_request(Protocol::Methods::IMPORT, [content])
-    end
-
-    # Exports the database as SurrealQL.
-    # @return [String] exported data
-    def export_data
-      @connection.send_request(Protocol::Methods::EXPORT)
-    end
-
     # --- Info ---
 
     # Returns the SurrealDB server version.

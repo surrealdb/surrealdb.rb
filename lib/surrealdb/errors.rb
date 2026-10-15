@@ -103,4 +103,23 @@ module SurrealDB
     'Configuration' => ConfigurationError,
     'Thrown' => ThrownError
   ).freeze
+
+  # Raised when statements of an import failed. The statements that did not
+  # fail have still been applied: an import is not atomic.
+  class ImportError < Error
+    # @return [Array<ServerError>] the failures (at most 100 are kept)
+    attr_reader :failures
+
+    # @return [Integer] how many statements failed
+    attr_reader :count
+
+    # @param failures [Array<ServerError>]
+    # @param count [Integer]
+    def initialize(failures, count = failures.length)
+      @failures = failures
+      @count = count
+      first = failures.first&.message
+      super("#{count} statement#{'s' unless count == 1} of the import failed#{": #{first}" if first}")
+    end
+  end
 end

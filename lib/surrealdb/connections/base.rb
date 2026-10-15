@@ -11,8 +11,9 @@ module SurrealDB
       # @return [Protocol::RPC]
       attr_reader :rpc
 
-      def initialize(url, **_options)
+      def initialize(url, **options)
         @url = url
+        @http_timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
         @rpc = Protocol::RPC.new
         @connected = false
         @state_mutex = Mutex.new
@@ -65,6 +66,12 @@ module SurrealDB
       # @return [Boolean]
       def supports_transactions?
         true
+      end
+
+      # The server's plain HTTP routes (/import, /export, /health).
+      # @return [HTTPEndpoint]
+      def http_endpoint
+        @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
       end
 
       # What the client has told a session so far.

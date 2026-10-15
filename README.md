@@ -265,6 +265,30 @@ SurrealDB.connect("ws://localhost:8000") do |db|
 end
 ```
 
+## Import and Export
+
+Import and export use the server's HTTP `/import` and `/export` routes, with
+the current namespace, database and credentials. They work on WebSocket and
+HTTP connections alike.
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+  db.use("test", "test")
+
+  sql = db.export                                  # the whole database
+  sql = db.export(tables: ["person"], users: false) # choose what to export
+  File.open("backup.surql", "w") { |f| db.export { |chunk| f.write(chunk) } } # stream it
+
+  # Imports must start with OPTION IMPORT; (exports already do)
+  db.import(sql)
+  File.open("backup.surql") { |f| db.import(f) }
+rescue SurrealDB::ImportError => e
+  # An import is not atomic: statements before the failures stay applied
+  puts "#{e.count} statements failed: #{e.failures.map(&:message)}"
+end
+```
+
 ## Embedded Database
 
 For in-process usage without a separate server, install the embedded gem:
