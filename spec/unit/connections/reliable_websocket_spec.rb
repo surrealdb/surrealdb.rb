@@ -402,6 +402,41 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe 'kill' do
+    it 'kills the live query again when a reconnect from another thread restarted it first' do
+      live = reliable.send_request('live', ['person'])
+      inner.calls.clear
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      allow(reliable).to receive(:kill_lost).and_wrap_original do |original, *args|
+        reliable.send(:ensure_connected!) # the background reconnect wins the race
+        original.call(*args)
+      end
+      reliable.send_request('kill', [live])
+      restarted = SurrealDB::Uuid.parse('00000000-0000-4000-8000-000000000002') # its id on the new connection
+      expect(methods_sent).to eq(%w[kill live kill])
+      expect(inner.calls.last[1]).to eq([restarted])
+    end
+  end
+
+  describe 'a response that arrived just before the connection dropped' do
+    it 'is recorded before the reconnect restores the state it changed' do
+      reliable.send_request('use', %w[ns old])
+      reconnect = nil
+      allow(inner).to receive(:execute).and_wrap_original do |original, method, params, **options|
+        result = original.call(method, params, **options)
+        if params == %w[ns new]
+          inner.close # the connection drops right after the answer
+          reconnect = Thread.new { reliable.send(:reconnect_in_background, 'closed') }
+          sleep 0.1 # and the reconnect starts before this request records its result
+        end
+        result
+      end
+      reliable.send_request('use', %w[ns new])
+      reconnect.join
+      expect(inner.calls.select { |call| call[0] == 'use' }.last[1]).to eq(%w[ns new])
+    end
+  end
+
   describe 'detach' do
     it 'forgets the session, rather than restoring it, when the connection dropped under the detach' do
       session = SurrealDB::Uuid.v4
@@ -412,6 +447,21 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(reliable.send_request('detach', [], session: session)).to be_nil
       expect(reliable.session_state(session)).to be_nil
       expect(inner.calls.map { |call| call.values_at(0, 2) }).to eq([['detach', session]])
+    end
+
+    it 'detaches the session again when a reconnect from another thread restored it first' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: session)
+      inner.calls.clear
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      allow(reliable).to receive(:detach_lost).and_wrap_original do |original, *args|
+        reliable.send(:ensure_connected!) # the background reconnect wins the race
+        original.call(*args)
+      end
+      reliable.send_request('detach', [], session: session)
+      expect(inner.calls.map { |call| call.values_at(0, 2) }).to eq([%w[detach] + [session], ['attach', session],
+                                                                     ['detach', session]])
+      expect(reliable.session_state(session)).to be_nil
     end
 
     it 'forgets the live queries of the detached session, and their handlers' do

@@ -91,10 +91,10 @@ module SurrealDB
     end
 
     # A transaction does not outlive its connection, so once a request
-    # through it is interrupted the transaction is over.
+    # through it fails with the connection the transaction is over.
     def request(method, params, **)
       @connection.send_request(method, params, session: @session, **)
-    rescue RequestInterruptedError
+    rescue ConnectionError
       @state = :lost
       raise
     end

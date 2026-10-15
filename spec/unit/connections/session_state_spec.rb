@@ -149,4 +149,26 @@ RSpec.describe SurrealDB::Connections::SessionState do
     state.track('authenticate', ['not-a-jwt'], nil)
     expect([state.namespace, state.database]).to eq(%w[app prod])
   end
+
+  it 'keeps the tokens and the namespace and database as they were, not the caller strings' do
+    token = +'token'
+    namespace = +'app'
+    state = described_class.new
+    state.track('authenticate', [token], nil)
+    state.track('use', [namespace, SurrealDB::NONE], nil)
+    pair = { 'access' => +'a1', 'refresh' => +'r1' }
+    other = described_class.new
+    other.track('signup', [{}], pair)
+    [token, namespace, pair['access'], pair['refresh']].each { |s| s << '-changed' }
+    expect([state.access_token, state.namespace]).to eq(%w[token app])
+    expect([other.access_token, other.refresh_token]).to eq(%w[a1 r1])
+  end
+
+  it 'selects the scope of the identity a refresh switches to' do
+    claims = Base64.urlsafe_encode64(JSON.generate('NS' => 'other', 'DB' => 'tenant2'), padding: false)
+    state = described_class.new
+    state.track('signin', [{ 'NS' => 'app', 'DB' => 'prod', 'user' => 'u', 'pass' => 'p' }], 'token')
+    state.track('refresh', [{ 'access' => 'someone-else', 'refresh' => 'r' }], { 'access' => "e30.#{claims}.s" })
+    expect([state.namespace, state.database]).to eq(%w[other tenant2])
+  end
 end
