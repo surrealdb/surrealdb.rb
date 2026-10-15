@@ -51,12 +51,15 @@ module SurrealDB
         when Protocol::Methods::SIGNIN
           @signin = [method, params]
           store_tokens(result)
-        when Protocol::Methods::SIGNUP, Protocol::Methods::REFRESH then store_tokens(result)
+        when Protocol::Methods::SIGNUP
+          @signin = nil # a new identity; the previous credentials are not its own
+          store_tokens(result)
+        when Protocol::Methods::REFRESH then store_tokens(result)
         when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
         when Protocol::Methods::REVOKE then forget_revoked(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
         when Protocol::Methods::RESET then reset
-        when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = params[1]
+        when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = snapshot(params[1])
         when Protocol::Methods::UNSET then @variables.delete(params[0].to_s)
         end
       end
@@ -96,6 +99,13 @@ module SurrealDB
 
         margin = [margin, @access_lifetime / 4.0].min if @access_lifetime
         @access_expires_at - now <= margin
+      end
+
+      # Whether the access token has expired.
+      # @param now [Time]
+      # @return [Boolean]
+      def expired?(now = Time.now)
+        !@access_expires_at.nil? && @access_expires_at <= now
       end
 
       # Whether an expiring token can be renewed: with the refresh token, or
@@ -147,6 +157,17 @@ module SurrealDB
       end
 
       private
+
+      # The value as it was sent: later changes to the caller's object must
+      # not change what a fork or a replay sends.
+      def snapshot(value)
+        case value
+        when Hash then value.to_h { |k, v| [snapshot(k), snapshot(v)] }
+        when Array then value.map { |v| snapshot(v) }
+        when String then value.frozen? ? value : value.dup
+        else value
+        end
+      end
 
       # The server answers `use` with the resulting namespace and database
       # (NONE for one that is not set). Older servers answer with nothing, so

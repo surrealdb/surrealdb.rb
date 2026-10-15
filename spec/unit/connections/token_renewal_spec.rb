@@ -9,7 +9,7 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
   let(:fake_class) do
     Class.new(described_class) do
       attr_reader :calls
-      attr_accessor :next_expiry, :fail_on
+      attr_accessor :next_expiry, :fail_on, :reject
 
       def initialize(url, **options)
         super
@@ -22,6 +22,7 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
       def execute(method, *, **)
         @calls << method
         raise SurrealDB::ConnectionError, 'connection closed' if method == fail_on
+        raise SurrealDB::NotAllowedError, 'invalid refresh token' if method == reject
 
         case method
         when 'signin' then token
@@ -97,6 +98,32 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     expect { connection.send_request('create', ['person']) }
       .to raise_error(SurrealDB::NotConnectedError, /renewing the access token.*'create' was not sent/)
     expect(connection.calls).not_to include('create')
+  end
+
+  it 'keeps using a token that has not expired when renewing it is refused' do
+    connection.next_expiry = Time.now + 30
+    connection.send_request('signup', [{}])
+    connection.reject = 'refresh'
+    expect(connection.send_request('select', ['person'])).to eq('ok')
+    expect(connection.calls).to eq(%w[signup refresh select])
+  end
+
+  it 'refuses the request when the token has expired and renewing it is refused' do
+    connection.next_expiry = Time.now - 1
+    connection.send_request('signup', [{}])
+    connection.reject = 'refresh'
+    expect { connection.send_request('select', ['person']) }
+      .to raise_error(SurrealDB::AuthenticationError, /expired.*invalid refresh token.*'select' was not sent/)
+    expect(connection.calls).to eq(%w[signup refresh])
+  end
+
+  it 'does not sign in again as a previous identity after a signup' do
+    connection.next_expiry = Time.now + 3600
+    connection.send_request('signin', [{ 'user' => 'root', 'pass' => 'root' }])
+    allow(connection).to receive(:execute).and_call_original
+    allow(connection).to receive(:execute).with('signup', any_args).and_return('new-identity-token')
+    connection.send_request('signup', [{ 'ac' => 'user' }])
+    expect(connection.session_state).not_to be_renewable
   end
 
   context 'with renew_tokens: false' do
