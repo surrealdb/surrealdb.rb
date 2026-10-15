@@ -10,6 +10,9 @@ module SurrealDB
   module RequestMethods
     include QueryMethods
 
+    # What a statement result's status can be.
+    STATEMENT_STATUSES = %w[OK ERR].freeze
+
     # Keeps at most this many import failures on an {ImportError}.
     KEPT_IMPORT_FAILURES = 100
 
@@ -339,12 +342,16 @@ module SurrealDB
       rescue StandardError => e
         raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
       end
-      unless results.is_a?(Array) && results.all?(Hash)
+      unless statement_results?(results)
         raise ProtocolError, "the import's result is not a list of statement results" if succeeded
 
         return []
       end
       results.select { |r| r['status'] == 'ERR' }
+    end
+
+    def statement_results?(results)
+      results.is_a?(Array) && results.all? { |r| r.is_a?(Hash) && STATEMENT_STATUSES.include?(r['status']) }
     end
 
     # Commits after the block returns normally. Anything else (an exception,
