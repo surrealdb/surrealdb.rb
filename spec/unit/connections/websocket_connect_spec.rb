@@ -139,6 +139,36 @@ RSpec.describe SurrealDB::Connections::WebSocket do
     end
   end
 
+  context 'when the connection is reset during the upgrade' do
+    it 'raises ConnectionError, which a reconnect retries, not the raw error' do
+      connection = described_class.new('ws://db.example.com', connect_timeout: 1)
+      socket = instance_double(TCPSocket)
+      allow(socket).to receive(:read_nonblock).and_raise(Errno::ECONNRESET)
+      connection.instance_variable_set(:@socket, socket)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+      expect { connection.send(:wait_for_open, deadline) }
+        .to raise_error(SurrealDB::ConnectionError, /handshake failed: Errno::ECONNRESET/)
+    end
+  end
+
+  context 'when the server does not read the upgrade request' do
+    it 'gives up writing it at the deadline' do
+      connection = described_class.new('ws://db.example.com', connect_timeout: 0.3)
+      tcp = instance_double(TCPSocket, write_nonblock: :wait_writable)
+      allow(tcp).to receive(:to_io).and_return(tcp)
+      allow(tcp).to receive(:wait_writable) do |left|
+        sleep(left)
+        nil # never writable
+      end
+      wrapper = SurrealDB::Connections::SocketWrapper.new(tcp, 'ws://db.example.com/rpc')
+      connection.instance_variable_set(:@wrapper, wrapper)
+      connection.instance_variable_set(:@driver, WebSocket::Driver.client(wrapper, protocols: ['cbor']))
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.3
+      expect { Timeout.timeout(2) { connection.send(:send_upgrade, deadline) } }
+        .to raise_error(SurrealDB::ConnectionError, /handshake timed out/)
+    end
+  end
+
   it 'defaults connect_timeout to the request timeout' do
     expect(described_class.new('ws://localhost:1', timeout: 7).connect_timeout).to eq(7)
   end
