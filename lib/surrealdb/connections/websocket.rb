@@ -27,6 +27,8 @@ module SurrealDB
     # Fiber scheduler (Ruby 3.1+). This means the SDK works transparently with
     # the `async` gem and similar frameworks.
     class WebSocket < Base
+      include WebSocketConnect
+
       # @return [Integer] response timeout in seconds
       attr_reader :timeout
 
@@ -45,6 +47,14 @@ module SurrealDB
         @socket = nil
         @driver = nil
         @reader_thread = nil
+        @on_disconnect = nil
+      end
+
+      # Registers a callback run (on its own thread) when the connection is
+      # lost without {#close} having been called.
+      # @yield [String] why the connection was lost
+      def on_disconnect(&block)
+        @on_disconnect = block
       end
 
       # Opens the connection. The TCP connect, the TLS handshake and the
@@ -75,16 +85,14 @@ module SurrealDB
       end
 
       def close
-        return unless @connected
-
+        was_connected = @connected
         @connected = false
-        @driver&.close
+        @driver&.close if was_connected
+        close_socket # unblocks the reader, which is waiting in readpartial
         shutdown_reader
-        @socket&.close
-        @socket = nil
 
         notify_pending_closed
-        log(:debug, 'WebSocket connection closed')
+        log(:debug, 'WebSocket connection closed') if was_connected
       end
 
       def supports_live_queries?
@@ -107,7 +115,7 @@ module SurrealDB
       protected
 
       def execute(method, params, session: nil, txn: nil)
-        raise ConnectionError, 'not connected' unless @connected
+        raise NotConnectedError, 'not connected' unless @connected
 
         id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
         entry = { result: nil, cv: ConditionVariable.new }
@@ -115,7 +123,7 @@ module SurrealDB
         @mutex.synchronize { @pending[id] = entry }
 
         begin
-          @write_mutex.synchronize { @driver.binary(encoded) }
+          write_frame(encoded)
           wait_for_response(entry)
         ensure
           @mutex.synchronize { @pending.delete(id) }
@@ -126,86 +134,6 @@ module SurrealDB
 
       def monotonic_now
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
-      def remaining(deadline, what)
-        left = deadline - monotonic_now
-        raise ConnectionError, "#{what} timed out after #{@connect_timeout}s" if left <= 0
-
-        left
-      end
-
-      def open_socket(uri, deadline)
-        port = uri.port || default_port(uri.scheme)
-        tcp = tcp_connect(uri.host, port, deadline)
-        return tcp unless uri.scheme == 'wss'
-
-        tls_connect(tcp, uri.host, deadline)
-      end
-
-      # Resolves the host, then tries its addresses in turn, all within the
-      # one deadline. (Socket.tcp gives each address its own connect_timeout
-      # and does not bound the lookup on every platform.)
-      # An address can also time out on its own (the OS gives up on it)
-      # before the deadline; the next one gets the time left.
-      def tcp_connect(host, port, deadline)
-        error = nil
-        resolve(host, port, deadline).each do |addr|
-          left = deadline - monotonic_now
-          break if left <= 0
-
-          return addr.connect(timeout: left)
-        rescue SystemCallError, IO::TimeoutError => e
-          error = e
-        end
-        raise tcp_connect_error(host, port, error, monotonic_now >= deadline)
-      end
-
-      def tcp_connect_error(host, port, error, out_of_time)
-        if out_of_time || error.is_a?(Errno::ETIMEDOUT) || error.is_a?(IO::TimeoutError)
-          ConnectionError.new("TCP connect to #{host}:#{port} timed out after #{@connect_timeout}s")
-        else
-          ConnectionError.new("cannot connect to #{host}:#{port}: #{error&.message || 'no addresses'}")
-        end
-      end
-
-      # getaddrinfo cannot be interrupted, so the lookup runs in a thread
-      # that is left to finish on its own if the deadline passes first.
-      def resolve(host, port, deadline)
-        lookup = Thread.new { Addrinfo.getaddrinfo(host, port, nil, :STREAM) }
-        lookup.report_on_exception = false
-        return lookup.value if lookup.join(remaining(deadline, 'DNS lookup'))
-
-        raise ConnectionError, "DNS lookup of #{host} timed out after #{@connect_timeout}s"
-      rescue SocketError => e
-        raise ConnectionError, "cannot connect to #{host}:#{port}: #{e.message}"
-      end
-
-      def tls_connect(tcp, host, deadline)
-        ctx = OpenSSL::SSL::SSLContext.new
-        ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
-        ctx.cert_store = OpenSSL::X509::Store.new.tap(&:set_default_paths)
-        ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-        ssl.hostname = host
-        ssl.sync_close = true
-        loop do
-          ssl.connect_nonblock
-          return ssl
-        rescue IO::WaitReadable
-          tcp.wait_readable(remaining(deadline, 'TLS handshake'))
-        rescue IO::WaitWritable
-          tcp.wait_writable(remaining(deadline, 'TLS handshake'))
-        end
-      rescue OpenSSL::SSL::SSLError, SystemCallError => e
-        tcp.close
-        raise ConnectionError, "TLS handshake with #{host} failed: #{e.message}"
-      rescue ConnectionError
-        tcp.close
-        raise
-      end
-
-      def default_port(scheme)
-        scheme == 'wss' ? 443 : 80
       end
 
       def build_ws_url(uri)
@@ -237,8 +165,7 @@ module SurrealDB
         end
 
         @driver.on :close do
-          @connected = false
-          notify_pending_closed
+          connection_lost('closed by the server')
         end
       end
 
@@ -310,20 +237,41 @@ module SurrealDB
         while @connected
           data = read_socket
           if data.nil? || data.empty?
-            @connected = false
-            notify_pending_closed
+            connection_lost('closed by the peer')
             break
           end
           @driver.parse(data)
         end
-      rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError => e
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}") if @connected
+        connection_lost("#{e.class}: #{e.message}")
+      end
+
+      # Marks the connection dead, fails the requests waiting on it, and tells
+      # whoever asked (see {#on_disconnect}). Does nothing after {#close}.
+      def connection_lost(reason)
+        return unless @connected
+
         @connected = false
+        close_socket
         notify_pending_closed
-        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}")
+        callback = @on_disconnect
+        Thread.new { callback.call(reason) } if callback
+      end
+
+      def close_socket
+        @socket&.close
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        @socket = nil
       end
 
       def read_socket
-        @socket.readpartial(16_384)
+        socket = @socket
+        return nil unless socket
+
+        socket.readpartial(16_384)
       rescue EOFError
         nil
       end
@@ -370,9 +318,12 @@ module SurrealDB
       end
 
       def shutdown_reader
-        @reader_thread&.join(2)
-        @reader_thread&.kill if @reader_thread&.alive?
+        thread = @reader_thread
         @reader_thread = nil
+        return if thread.nil? || thread == Thread.current
+
+        thread.join(2)
+        thread.kill if thread.alive?
       end
 
       # Signals :closed on every pending request so blocked callers
@@ -405,6 +356,15 @@ module SurrealDB
 
         response = @rpc.decode_response(result)
         Protocol::Response.extract_result(response)
+      end
+
+      # A frame the socket refused was not sent, so the request is safe to
+      # send again: report it as NotConnectedError, not as an interruption.
+      def write_frame(encoded)
+        @write_mutex.synchronize { @driver.binary(encoded) }
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        connection_lost("write failed: #{e.class}: #{e.message}")
+        raise NotConnectedError, "not connected (#{e.message})"
       end
     end
   end

@@ -5,6 +5,10 @@ module SurrealDB
 
   class ConnectionError < Error; end
 
+  # A request was not sent because the connection was down. Unlike other
+  # ConnectionErrors, it is always safe to send it again.
+  class NotConnectedError < ConnectionError; end
+
   # The connection was lost while a request was in flight, so the request
   # may or may not have run. Raised instead of retrying requests that are
   # not safe to repeat (queries, writes, transactions).

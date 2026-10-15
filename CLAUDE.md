@@ -73,7 +73,7 @@ SurrealDB encodes custom types via numbered CBOR tags. See `lib/surrealdb/cbor/t
 
 9. **Async/Fiber compatibility**: WebSocket `send_request` uses `ConditionVariable#wait` instead of busy-wait polling. This is compatible with Ruby's Fiber scheduler (Ruby 3.1+), so the SDK works transparently with the `async` gem and similar frameworks.
 
-10. **Reconnection**: `Connections::ReliableWebSocket` wraps a WebSocket with auto-reconnect. Tracks `use`, `signin`/`signup`/`authenticate`, `let` calls and replays them after reconnecting. Uses exponential backoff.
+10. **Reconnection** (on by default for ws/wss; `reconnect: false` opts out): `Connections::ReliableWebSocket` wraps a WebSocket and reconnects as soon as the inner connection reports a drop (`on_disconnect`). It restores every session from the inner connection's `SessionState`s (use, variables, authenticate with signin fallback; signup never replayed) and re-issues `live` queries, relabelling notifications to the original id. A request that never left (`NotConnectedError`) is resent; one in flight is resent only if in `SAFE_TO_REPEAT`, else `RequestInterruptedError`. Requests in a transaction begun on an earlier connection always raise `RequestInterruptedError`.
 
 11. **`query_raw`**: Returns `Array<QueryResult>` with per-statement `status`, `time`, `result`, `error`. Use when you need to inspect individual statement outcomes in multi-statement queries.
 

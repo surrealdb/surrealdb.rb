@@ -3,6 +3,7 @@
 module SurrealDB
   module Protocol
     module Methods
+      PING            = 'ping'
       USE             = 'use'
       INFO            = 'info'
       VERSION         = 'version'
@@ -37,7 +38,7 @@ module SurrealDB
       # not known whether the first attempt ran. (Not DETACH: run twice, the
       # second finds no session and fails.)
       SAFE_TO_REPEAT = [
-        'ping', VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS
+        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS
       ].freeze
     end
   end

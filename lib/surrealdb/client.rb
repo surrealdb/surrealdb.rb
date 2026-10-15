@@ -22,7 +22,12 @@ module SurrealDB
     attr_reader :connection
 
     # @param url [String] connection URL (ws://, wss://, http://, https://)
-    # @param options [Hash] connection options (:timeout, etc.)
+    # @param options [Hash] connection options
+    # @option options [Numeric] :timeout response timeout in seconds
+    # @option options [Numeric] :connect_timeout WebSocket connect deadline (defaults to :timeout)
+    # @option options [Boolean] :reconnect reconnect WebSocket connections automatically (default true)
+    # @option options [Integer] :reconnect_max_retries reconnection attempts before giving up (default 5)
+    # @option options [Numeric] :reconnect_delay base backoff delay in seconds (default 1.0)
     def initialize(url, **options)
       @url = url
       @options = options
@@ -175,7 +180,7 @@ module SurrealDB
       case uri.scheme
       when 'ws', 'wss'
         ws = Connections::WebSocket.new(url, **options)
-        options[:reconnect] ? Connections::ReliableWebSocket.new(ws, **options) : ws
+        options.fetch(:reconnect, true) ? Connections::ReliableWebSocket.new(ws, **options) : ws
       when 'http', 'https'
         Connections::HTTP.new(url, **options)
       when 'mem', 'memory', 'surrealkv', 'file'

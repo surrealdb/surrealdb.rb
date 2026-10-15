@@ -2,13 +2,19 @@
 
 RSpec.describe SurrealDB::Client do
   describe 'URL scheme dispatch' do
-    it 'creates a WebSocket connection for ws://' do
+    it 'creates a reconnecting WebSocket connection for ws://' do
       client = described_class.new('ws://localhost:8000')
-      expect(client.connection).to be_a(SurrealDB::Connections::WebSocket)
+      expect(client.connection).to be_a(SurrealDB::Connections::ReliableWebSocket)
+      expect(client.connection.inner).to be_a(SurrealDB::Connections::WebSocket)
     end
 
-    it 'creates a WebSocket connection for wss://' do
+    it 'creates a reconnecting WebSocket connection for wss://' do
       client = described_class.new('wss://localhost:8000')
+      expect(client.connection).to be_a(SurrealDB::Connections::ReliableWebSocket)
+    end
+
+    it 'creates a plain WebSocket connection with reconnect: false' do
+      client = described_class.new('ws://localhost:8000', reconnect: false)
       expect(client.connection).to be_a(SurrealDB::Connections::WebSocket)
     end
 
