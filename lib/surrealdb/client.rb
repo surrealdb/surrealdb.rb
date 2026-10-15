@@ -79,7 +79,7 @@ module SurrealDB
       false
     end
 
-    # --- Sessions / Transactions (WebSocket only) ---
+    # --- Sessions ---
 
     # Attaches a new server session on this connection.
     #
@@ -126,19 +126,29 @@ module SurrealDB
       with_session(session, &)
     end
 
-    # Detaches a session, discarding its server-side state.
+    # Detaches a session, discarding its server-side state. A {Session}
+    # passed here is closed, so later requests through it raise
+    # {SessionError} instead of reaching the server.
     # @param session [Session, Uuid, String]
     # @return [void]
     def detach(session)
       require_sessions!
+      return if session.is_a?(Session) && session.closed?
+
       @connection.send_request(Protocol::Methods::DETACH, [], session: session_id(session))
+      session.send(:detached!) if session.is_a?(Session)
       nil
     end
 
     # Lists the ids of the sessions attached on this connection.
     # @return [Array<Uuid>]
+    # @raise [UnsupportedError] over HTTP, where the server refuses it
     def sessions
       require_sessions!
+      unless @connection.supports_session_listing?
+        raise UnsupportedError, "listing sessions is not supported by #{@connection.class.name}"
+      end
+
       @connection.send_request(Protocol::Methods::SESSIONS)
     end
 

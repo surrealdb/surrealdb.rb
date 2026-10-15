@@ -24,15 +24,6 @@ module SurrealDB
     # Live queries started by a LIVE SELECT statement inside {#query} are not
     # tracked and are not restored.
     class ReliableWebSocket < Base
-      # Methods that can be repeated without changing anything when it is not
-      # known whether the first attempt ran.
-      SAFE_TO_REPEAT = [
-        Protocol::Methods::PING, Protocol::Methods::VERSION, Protocol::Methods::INFO,
-        Protocol::Methods::SELECT, Protocol::Methods::USE, Protocol::Methods::LET, 'set',
-        Protocol::Methods::UNSET, Protocol::Methods::AUTHENTICATE, Protocol::Methods::INVALIDATE,
-        Protocol::Methods::SESSIONS, Protocol::Methods::DETACH, Protocol::Methods::RESET
-      ].freeze
-
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
       # @return [Integer] max reconnection attempts before giving up
@@ -150,7 +141,7 @@ module SurrealDB
         raise
       rescue ConnectionError => e
         ensure_connected!
-        raise_interrupted(method, e) unless txn.nil? && SAFE_TO_REPEAT.include?(method)
+        raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
 
         attempt(method, params, session, txn)
       end
@@ -227,7 +218,7 @@ module SurrealDB
         log(:warn, "WebSocket connection lost (#{reason}); reconnecting")
         ensure_connected!
       rescue ConnectionError => e
-        log(:error, "Reconnection failed: #{e.message}")
+        log(@closed ? :debug : :error, "Reconnection failed: #{e.message}")
       end
 
       # Reconnects and restores state, once, however many threads notice the
@@ -257,16 +248,28 @@ module SurrealDB
       end
 
       # @raise [ConnectionError] if all attempts fail
+      # @raise [NotConnectedError] if {#close} is called meanwhile
       def reconnect!
         reconnected = @max_retries.times.any? do |i|
           # The first attempt is immediate; later ones back off exponentially.
           delay = i.zero? ? 0 : @reconnect_delay * (2**(i - 1))
           log(:debug, "Reconnection attempt #{i + 1}/#{@max_retries} in #{delay}s")
           sleep delay if delay.positive?
-          reconnect_once(i + 1)
+          stop_if_closed
+          reconnect_once(i + 1).tap { stop_if_closed }
         end
         @connected = reconnected
         raise ConnectionError, "reconnection failed after #{@max_retries} attempts" unless reconnected
+      end
+
+      # {#close} does not wait for a reconnect in progress, so the reconnect
+      # checks between steps and drops a socket it opened after the close.
+      def stop_if_closed
+        return unless @closed
+
+        @inner.close
+        @connected = false
+        raise NotConnectedError, 'connection closed while reconnecting'
       end
 
       def reconnect_once(attempt)
@@ -278,11 +281,14 @@ module SurrealDB
         false
       end
 
+      # One session failing to restore does not stop the others.
       def restore_sessions
         restore_session(nil, @inner.session_state(nil))
         @inner.attached_sessions.each do |id, state|
           @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
           restore_session(id, state)
+        rescue ServerError => e
+          log(:error, "Could not restore session #{id}: #{e.message}")
         end
       end
 
@@ -296,16 +302,30 @@ module SurrealDB
 
       # Re-presents the token; when the server no longer accepts it (it
       # expired while we were away), signs in again with the credentials the
-      # session last signed in with. A signup is never repeated.
+      # session last signed in with. A signup is never repeated. A session
+      # that cannot authenticate again is left signed out, and the rest of
+      # its state is still restored.
       def restore_auth(id, state)
         return unless state.access_token
 
         @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
       rescue ServerError => e
-        raise unless state.signin
+        state.signin ? sign_in_again(id, state, e) : drop_auth(id, e)
+      end
 
-        log(:info, "Stored token rejected after reconnect (#{e.message}); signing in again")
+      def sign_in_again(id, state, error)
+        log(:info, "Stored token rejected after reconnect (#{error.message}); signing in again")
         @inner.send_request(*state.signin, session: id)
+      rescue ServerError => e
+        drop_auth(id, e)
+      end
+
+      # Forgets the credentials, so the session state says what the server
+      # now has: an unauthenticated session.
+      def drop_auth(id, error)
+        log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
+                   "reconnecting (#{error.message}); it is now signed out")
+        @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
       end
 
       def restore_live_queries

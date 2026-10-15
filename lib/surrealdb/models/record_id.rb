@@ -13,6 +13,11 @@ module SurrealDB
     # Characters an identifier may contain without being escaped.
     IDENT = /\A[a-zA-Z0-9_]+\z/
 
+    # Escape sequences SurrealQL writes inside ⟨...⟩ and `...`, other than
+    # a backslash before the character itself.
+    ESCAPES = { '\\' => '\\\\', "\0" => '\\0', "\r" => '\\r', "\t" => '\\t', "\n" => '\\n', "\f" => '\\f' }.freeze
+    UNESCAPES = { '0' => "\0", 'r' => "\r", 't' => "\t", 'n' => "\n", 'f' => "\f" }.freeze
+
     # @return [String] table name
     attr_reader :table
 
@@ -42,15 +47,7 @@ module SurrealDB
       table, rest = split_table(str)
       raise ArgumentError, "invalid record ID: #{str}" if table.nil? || table.empty? || rest.nil? || rest.empty?
 
-      id = if escaped?(rest)
-             rest[1..-2]
-           elsif rest.match?(IDENT)
-             try_numeric(rest)
-           else
-             raise ArgumentError, "cannot parse record ID #{str.inspect} on the client; " \
-                                  'use SurrealDB::StringRecordID to let the server parse it'
-           end
-      new(table, id)
+      new(table, parse_id(rest, str))
     end
 
     def to_s
@@ -73,23 +70,63 @@ module SurrealDB
     class << self
       private
 
-      # Splits on the first unescaped colon.
-      def split_table(str)
-        if str.start_with?('⟨', '`')
-          close = str.start_with?('`') ? '`' : '⟩'
-          finish = str.index(close, 1)
-          return [nil, nil] unless finish && str[finish + 1] == ':'
+      def parse_id(rest, str)
+        if rest.start_with?('⟨', '`')
+          value, finish = read_escaped(rest)
+          raise ArgumentError, "invalid record ID: #{str}" unless finish == rest.length
 
-          [str[1...finish], str[(finish + 2)..]]
+          value
+        elsif rest.match?(IDENT)
+          try_numeric(rest)
         else
-          str.split(':', 2)
+          raise ArgumentError, "cannot parse record ID #{str.inspect} on the client; " \
+                               'use SurrealDB::StringRecordID to let the server parse it'
         end
       end
 
-      def escaped?(str)
-        str.length >= 2 &&
-          ((str.start_with?('⟨') && str.end_with?('⟩')) ||
-           (str.start_with?('`') && str.end_with?('`')))
+      # Splits on the first colon outside an escaped table name.
+      def split_table(str)
+        return str.split(':', 2) unless str.start_with?('⟨', '`')
+
+        table, finish = read_escaped(str)
+        return [nil, nil] unless finish && str[finish] == ':'
+
+        [table, str[(finish + 1)..]]
+      end
+
+      # Reads the ⟨...⟩ or `...` identifier at the start of str, undoing its
+      # backslash escapes. Returns the identifier and the index just past
+      # the closing delimiter, or nil if it is never closed.
+      def read_escaped(str)
+        close = str.start_with?('`') ? '`' : '⟩'
+        out = +''
+        i = 1
+        while i < str.length
+          char = str[i]
+          return [out, i + 1] if char == close
+
+          if char == '\\'
+            i += 1
+            return nil if i >= str.length
+
+            char, i = read_escape(str, i)
+            out << char
+          else
+            out << char
+            i += 1
+          end
+        end
+        nil
+      end
+
+      # Decodes the escape whose character (after the backslash) is at pos.
+      def read_escape(str, pos)
+        char = str[pos]
+        if char == 'u' && str[pos + 1] == '{' && (close = str.index('}', pos + 2))
+          return [str[(pos + 2)...close].to_i(16).chr(Encoding::UTF_8), close + 1]
+        end
+
+        [UNESCAPES.fetch(char, char), pos + 1]
       end
 
       def try_numeric(str)
@@ -126,7 +163,7 @@ module SurrealDB
     def escape_ident(str)
       return str if str.match?(IDENT) && !str.match?(/\A\d+\z/)
 
-      "⟨#{str.gsub('⟩', '\\⟩')}⟩"
+      "⟨#{str.gsub(/[\\\0\r\t\n\f⟩]/) { |c| ESCAPES.fetch(c, "\\#{c}") }}⟩"
     end
 
     def format_object_id(obj)

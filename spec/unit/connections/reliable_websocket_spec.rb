@@ -112,6 +112,48 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect { reliable.send_request('version') }.to raise_error(SurrealDB::ConnectionError, /after 2 attempts/)
     end
 
+    context 'when closed while a reconnect is under way' do
+      let(:reliable) do
+        described_class.new(inner, reconnect_max_retries: 3, reconnect_delay: 0.2).tap(&:connect)
+      end
+
+      def close_soon
+        Thread.new do
+          sleep 0.05
+          reliable.close
+        end
+      end
+
+      it 'stops retrying' do
+        reliable
+        attempts = 0
+        allow(inner).to receive(:connect) do
+          attempts += 1
+          raise SurrealDB::ConnectionError, 'refused'
+        end
+        inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+        closer = close_soon
+        expect { reliable.send_request('version') }
+          .to raise_error(SurrealDB::NotConnectedError, /closed while reconnecting/)
+        closer.join
+        expect(attempts).to eq(1)
+        expect(reliable).not_to be_connected
+      end
+
+      it 'drops a socket that opened after the close' do
+        reliable
+        allow(inner).to receive(:connect).and_wrap_original do |original|
+          sleep 0.15
+          original.call
+        end
+        inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+        closer = close_soon
+        expect { reliable.send_request('version') }.to raise_error(SurrealDB::NotConnectedError)
+        closer.join
+        expect(inner).not_to be_connected
+      end
+    end
+
     it 'does not reconnect after close' do
       reliable.close
       inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
@@ -132,6 +174,15 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(inner.calls.count { |call| call[3] }).to eq(1)
       expect(methods_sent).not_to include('commit')
       expect(reliable.send_request('commit', [txn])).to eq('ok') # forgotten once ended
+    end
+
+    it 'marks a Transaction lost, so it is not used on the new connection' do
+      tx = SurrealDB::Transaction.new(reliable, txn)
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect { tx.commit }.to raise_error(SurrealDB::RequestInterruptedError)
+      expect(tx).to be_lost
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
+      expect(inner.calls.count { |call| call[3] }).to eq(0)
     end
 
     it 'does not repeat a read inside a transaction' do
@@ -177,6 +228,33 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       inner.calls.clear
       drop
       expect(inner.calls).to include(['signin', [{ 'user' => 'root', 'pass' => 'root' }], nil, nil])
+    end
+
+    it 'restores the rest of the state when a token that cannot be renewed is refused' do
+      reliable.send_request('signup', [{ 'access' => 'user', 'email' => 'a@b.c' }])
+      reliable.send_request('use', %w[ns db])
+      allow(inner).to receive(:send_request).and_call_original
+      allow(inner).to receive(:send_request).with('authenticate', anything, any_args)
+                                            .and_raise(SurrealDB::ServerError, 'token expired')
+      inner.calls.clear
+      drop
+      expect(methods_sent).to eq(%w[version invalidate use version])
+      expect(inner.session_state).not_to be_authenticated
+    end
+
+    it 'restores the other sessions when one cannot be restored' do
+      broken = SurrealDB::Uuid.v4
+      fine = SurrealDB::Uuid.v4
+      [broken, fine].each { |id| reliable.send_request('attach', [], session: id) }
+      reliable.send_request('use', %w[ns gone], session: broken)
+      reliable.send_request('use', %w[ns ok], session: fine)
+      allow(inner).to receive(:send_request).and_call_original
+      allow(inner).to receive(:send_request).with('use', %w[ns gone], any_args)
+                                            .and_raise(SurrealDB::ServerError, 'no such database')
+      inner.calls.clear
+      drop
+      expect(inner.calls).to include(['use', %w[ns ok], fine, nil])
+      expect(reliable).to be_connected
     end
 
     it 'never repeats a signup' do
