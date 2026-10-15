@@ -69,4 +69,28 @@ RSpec.describe SurrealDB::Client, '#connect version check' do
       expect(client.server_version).to eq('surrealdb-2.7.0')
     end
   end
+
+  context 'when asking for the version fails' do
+    let(:reported) { nil }
+
+    [SurrealDB::TimeoutError, SurrealDB::ServerError, SurrealDB::ProtocolError].each do |error|
+      it "closes the connection on #{error.name.split('::').last}" do
+        allow(connection).to receive(:send_request).and_raise(error, 'no answer')
+        expect { described_class.new('http://localhost:8000').connect }.to raise_error(error)
+        expect(connection).to have_received(:close)
+      end
+    end
+
+    it 'closes the connection opened by SurrealDB.connect, which never returns the client' do
+      allow(connection).to receive(:send_request).and_raise(SurrealDB::TimeoutError, 'no answer')
+      expect { SurrealDB.connect('http://localhost:8000') { nil } }.to raise_error(SurrealDB::TimeoutError)
+      expect(connection).to have_received(:close).once
+    end
+
+    it 'raises the original error when closing fails too' do
+      allow(connection).to receive(:send_request).and_raise(SurrealDB::TimeoutError, 'no answer')
+      allow(connection).to receive(:close).and_raise(IOError, 'already closed')
+      expect { described_class.new('http://localhost:8000').connect }.to raise_error(SurrealDB::TimeoutError)
+    end
+  end
 end

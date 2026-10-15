@@ -48,7 +48,14 @@ module SurrealDB
     #   (the connection is closed again)
     def connect
       @connection.connect
-      check_server_version
+      begin
+        check_server_version
+      rescue StandardError
+        # Whatever went wrong, the caller gets no usable client back, so the
+        # transport must not be left open.
+        close_quietly
+        raise
+      end
       self
     end
 
@@ -90,7 +97,7 @@ module SurrealDB
       false
     end
 
-    # --- Sessions / Transactions (WebSocket only) ---
+    # --- Sessions ---
 
     # Attaches a new server session on this connection.
     #
@@ -137,19 +144,29 @@ module SurrealDB
       with_session(session, &)
     end
 
-    # Detaches a session, discarding its server-side state.
+    # Detaches a session, discarding its server-side state. A {Session}
+    # passed here is closed, so later requests through it raise
+    # {SessionError} instead of reaching the server.
     # @param session [Session, Uuid, String]
     # @return [void]
     def detach(session)
       require_sessions!
+      return if session.is_a?(Session) && session.closed?
+
       @connection.send_request(Protocol::Methods::DETACH, [], session: session_id(session))
+      session.send(:detached!) if session.is_a?(Session)
       nil
     end
 
     # Lists the ids of the sessions attached on this connection.
     # @return [Array<Uuid>]
+    # @raise [UnsupportedError] over HTTP, where the server refuses it
     def sessions
       require_sessions!
+      unless @connection.supports_session_listing?
+        raise UnsupportedError, "listing sessions is not supported by #{@connection.class.name}"
+      end
+
       @connection.send_request(Protocol::Methods::SESSIONS)
     end
 
@@ -172,9 +189,12 @@ module SurrealDB
     def check_server_version
       @server_version = @connection.send_request(Protocol::Methods::VERSION).to_s
       ServerVersion.check!(@server_version) if @version_check
-    rescue UnsupportedVersionError
+    end
+
+    def close_quietly
       @connection.close
-      raise
+    rescue StandardError => e
+      SurrealDB.configuration.logger&.debug("Closing after a failed connect also failed: #{e.message}")
     end
 
     def rpc(method, params = [], timeout: nil)
