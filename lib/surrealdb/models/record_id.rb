@@ -13,13 +13,19 @@ module SurrealDB
     # Characters an identifier may contain without being escaped.
     IDENT = /\A[a-zA-Z0-9_]+\z/
 
-    # Escape sequences SurrealQL writes inside ⟨...⟩ and `...`, other than
-    # a backslash before the character itself. It writes a backspace as
-    # \u{8} but reads \b too.
+    # How characters are escaped inside ⟨...⟩. SurrealQL writes a backspace
+    # as \u{8}; a closing bracket must be \u{27e9}, as SurrealDB 3 rejects
+    # \⟩.
     ESCAPES = {
-      '\\' => '\\\\', "\0" => '\\0', "\r" => '\\r', "\t" => '\\t', "\n" => '\\n', "\f" => '\\f', "\b" => '\\u{8}'
+      '\\' => '\\\\', "\0" => '\\0', "\r" => '\\r', "\t" => '\\t', "\n" => '\\n', "\f" => '\\f', "\b" => '\\u{8}',
+      '⟩' => '\\u{27e9}'
     }.freeze
-    UNESCAPES = { '0' => "\0", 'r' => "\r", 't' => "\t", 'n' => "\n", 'f' => "\f", 'b' => "\b" }.freeze
+    # The escapes SurrealQL reads inside ⟨...⟩ and `...`, besides \u{...}
+    # and \uXXXX; any other is invalid. (\⟩ is read as newer servers do.)
+    UNESCAPES = {
+      '0' => "\0", 'r' => "\r", 't' => "\t", 'n' => "\n", 'f' => "\f", 'b' => "\b",
+      '\\' => '\\', "'" => "'", '"' => '"', '`' => '`', '⟩' => '⟩'
+    }.freeze
 
     # @return [String] table name
     attr_reader :table
@@ -127,18 +133,28 @@ module SurrealDB
       # Decodes the escape whose character (after the backslash) is at pos.
       def read_escape(str, pos)
         char = str[pos]
-        if char == 'u' && str[pos + 1] == '{'
+        return read_unicode_escape(str, pos) if char == 'u'
+        raise ArgumentError, "invalid escape \\#{char}" unless UNESCAPES.key?(char)
+
+        [UNESCAPES[char], pos + 1]
+      end
+
+      # \u{...} with 1 to 6 hex digits, or \u with exactly 4.
+      def read_unicode_escape(str, pos)
+        if str[pos + 1] == '{'
           close = str.index('}', pos + 2)
           raise ArgumentError, 'unterminated unicode escape \\u{' unless close
 
           return [unicode_char(str[(pos + 2)...close]), close + 1]
         end
+        hex = str[pos + 1, 4].to_s
+        raise ArgumentError, "invalid unicode escape \\u#{hex}" unless hex.match?(/\A\h{4}\z/)
 
-        [UNESCAPES.fetch(char, char), pos + 1]
+        [unicode_char(hex), pos + 5]
       end
 
-      # The character a \u{...} escape names: 1 to 6 hex digits giving a
-      # Unicode scalar value (not a surrogate).
+      # The character a unicode escape names: hex digits giving a Unicode
+      # scalar value (not a surrogate).
       def unicode_char(hex)
         code = Integer(hex, 16) if hex.match?(/\A\h{1,6}\z/)
         valid = code && code <= 0x10FFFF && !code.between?(0xD800, 0xDFFF)
