@@ -193,7 +193,9 @@ RSpec.describe SurrealDB::Client do
   end
 
   describe '#send_rpc' do
-    let(:connection) { instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true) }
+    let(:connection) do
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true)
+    end
     let(:client) { described_class.new('ws://localhost:8000') }
 
     before do
@@ -205,6 +207,12 @@ RSpec.describe SurrealDB::Client do
       result = client.send_rpc('custom_method', [1, 2, 3])
       expect(connection).to have_received(:send_request).with('custom_method', [1, 2, 3])
       expect(result).to eq('ok')
+    end
+
+    it 'runs them in the session it is called on' do
+      session = client.new_session
+      session.send_rpc('custom_method', [1])
+      expect(connection).to have_received(:send_request).with('custom_method', [1], session: session.id)
     end
   end
 

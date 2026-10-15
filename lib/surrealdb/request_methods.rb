@@ -249,6 +249,18 @@ module SurrealDB
       rpc(Protocol::Methods::INFO)
     end
 
+    # --- Generic RPC ---
+
+    # Sends an arbitrary RPC method call. Useful as an escape hatch for
+    # server methods not yet wrapped by the SDK. On a {Session} it runs in
+    # that session.
+    # @param method [String] RPC method name
+    # @param params [Array] method parameters
+    # @return [Object] decoded result
+    def send_rpc(method, params = [])
+      rpc(method, params)
+    end
+
     private
 
     # Table or record target for CRUD methods. Typed values are passed through
