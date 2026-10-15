@@ -43,10 +43,12 @@ module SurrealDB
         case method
         when Protocol::Methods::USE then track_use(params, result)
         when Protocol::Methods::SIGNIN
-          @signin = [method, params]
+          @signin = [method, snapshot(params)]
           store_tokens(result)
-        when Protocol::Methods::SIGNUP then store_tokens(result)
-        when Protocol::Methods::AUTHENTICATE then store_tokens(params[0])
+        when Protocol::Methods::SIGNUP
+          @signin = nil # a new identity; the previous credentials are not its own
+          store_tokens(result)
+        when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
         when Protocol::Methods::RESET then reset
         when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = snapshot(params[1])
@@ -133,6 +135,16 @@ module SurrealDB
           @access_token = result['access'] || result['token']
           @refresh_token = result['refresh']
         end
+      end
+
+      # Re-presenting the current token (as a reconnect does) changes
+      # nothing; a different token is a different identity, so the refresh
+      # token and sign-in credentials of the previous one are dropped.
+      def authenticated_with(token)
+        return if token == @access_token
+
+        store_tokens(token)
+        @signin = nil
       end
     end
   end

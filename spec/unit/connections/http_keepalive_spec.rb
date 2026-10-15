@@ -37,6 +37,19 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  it 'raises ConnectionError when the next request cannot open a new socket' do
+    server = ScriptedHTTPServer.new(%i[drop])
+    http = http_to(server)
+    Timeout.timeout(5) do
+      expect { http.send_request('ping') }.to raise_error(SurrealDB::ConnectionError)
+      server.close
+      expect { http.send_request('ping') }.to raise_error(SurrealDB::ConnectionError, /cannot open an HTTP connection/)
+    end
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'does not resend a write, which the server may already have run' do
     server = ScriptedHTTPServer.new(%i[ok drop ok])
     http = http_to(server)
