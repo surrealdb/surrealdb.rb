@@ -431,4 +431,16 @@ RSpec.shared_examples 'session variables' do
     client.unset('temp')
     expect(value_of('RETURN $temp')).to eq(SurrealDB::NONE)
   end
+
+  it 'refuses a name the server protects, as it does over every transport' do
+    expect { client.set('auth', 1) }.to raise_error(SurrealDB::ServerError)
+    expect(value_of('RETURN $auth')).not_to eq(1)
+  end
+
+  it 'keeps the value as it was set, whatever the caller does to its object later' do
+    tags = ['a']
+    client.set('tags', tags)
+    tags << 'b'
+    expect(value_of('RETURN $tags')).to eq(['a'])
+  end
 end
