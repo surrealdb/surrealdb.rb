@@ -19,7 +19,15 @@ module SurrealDB
     class HTTP < Base
       # Errors that mean the kept-alive socket was already dead: the server
       # closed it while idle, and the close raced our request.
-      STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED].freeze
+      # An HTTPS peer that closes the socket without a TLS close_notify makes
+      # OpenSSL raise this instead of EOFError.
+      module TLSEndOfFile
+        def self.===(error)
+          error.is_a?(OpenSSL::SSL::SSLError) && error.message.match?(/unexpected eof/i)
+        end
+      end
+
+      STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED, TLSEndOfFile].freeze
 
       def initialize(url, **options)
         super
