@@ -38,6 +38,16 @@ RSpec.describe SurrealDB::Uuid do
 end
 
 RSpec.describe SurrealDB::FileRef do
+  it 'keeps frozen copies, leaving the caller strings as they were' do
+    bucket = +'b'
+    key = +'/k'
+    file = described_class.new(bucket, key)
+    bucket << 'x'
+    key << 'y'
+    expect([file.bucket, file.key]).to eq(%w[b /k])
+    expect([file.bucket, file.key]).to all(be_frozen)
+  end
+
   it 'normalises the key to start with a slash' do
     expect(described_class.new('avatars', 'alice.png').key).to eq('/alice.png')
     expect(described_class.new('avatars', '/alice.png').to_s).to eq('f"avatars:/alice.png"')
