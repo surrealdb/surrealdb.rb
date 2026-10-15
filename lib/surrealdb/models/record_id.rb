@@ -124,7 +124,10 @@ module SurrealDB
       # Decodes the escape whose character (after the backslash) is at pos.
       def read_escape(str, pos)
         char = str[pos]
-        if char == 'u' && str[pos + 1] == '{' && (close = str.index('}', pos + 2))
+        if char == 'u' && str[pos + 1] == '{'
+          close = str.index('}', pos + 2)
+          raise ArgumentError, 'unterminated unicode escape \\u{' unless close
+
           return [unicode_char(str[(pos + 2)...close]), close + 1]
         end
 
