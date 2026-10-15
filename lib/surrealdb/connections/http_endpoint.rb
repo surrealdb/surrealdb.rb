@@ -59,6 +59,8 @@ module SurrealDB
         raise TimeoutError, "HTTP #{path} timed out: #{e.message}"
       rescue SystemCallError, IOError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"
+      rescue Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => e
+        raise ProtocolError, "HTTP #{path} got a malformed response: #{e.message}"
       end
 
       # An error the caller's block raised while reading a streamed body. It

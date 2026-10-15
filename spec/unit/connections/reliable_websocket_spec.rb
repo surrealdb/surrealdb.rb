@@ -388,7 +388,32 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe '#connect after #close' do
+    it 'restores the sessions and live queries the client still holds' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('use', %w[ns db], session: session)
+      reliable.send_request('live', ['person'])
+      reliable.close
+      inner.calls.clear
+      reliable.connect
+      expect(inner.calls).to include(['attach', [], session, nil], ['use', %w[ns db], session, nil])
+      expect(methods_sent).to include('live')
+    end
+  end
+
   describe 'detach' do
+    it 'forgets the session, rather than restoring it, when the connection dropped under the detach' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('live', ['person'], session: session)
+      inner.calls.clear
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      expect(reliable.send_request('detach', [], session: session)).to be_nil
+      expect(reliable.session_state(session)).to be_nil
+      expect(inner.calls.map { |call| call.values_at(0, 2) }).to eq([['detach', session]])
+    end
+
     it 'forgets the live queries of the detached session, and their handlers' do
       session = SurrealDB::Uuid.v4
       reliable.send_request('attach', [], session: session)

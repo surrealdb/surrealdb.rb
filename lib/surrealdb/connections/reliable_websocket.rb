@@ -24,6 +24,8 @@ module SurrealDB
     # Live queries started by a LIVE SELECT statement inside {#query} are not
     # tracked and are not restored.
     class ReliableWebSocket < Base
+      include ReliableRestore
+
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
       # @return [Integer] max reconnection attempts before giving up
@@ -56,11 +58,18 @@ module SurrealDB
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
+      # Connecting again after {#close} restores what the client still holds
+      # (sessions, live queries), as a reconnect does: the new connection
+      # has none of it.
       def connect
-        @closed = false
-        @inner.connect
-        @opened = true
-        @connected = true
+        @reconnect_mutex.synchronize do
+          @closed = false
+          @inner.connect
+          reopened = @opened
+          @opened = true
+          @connected = true
+          restore_state if reopened
+        end
       end
 
       def close
@@ -164,7 +173,7 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        return kill_lost(params[0]) if method == Protocol::Methods::KILL
+        return ended_with_connection(method, params, session) if ends_with_connection?(method, session)
 
         ensure_connected!
         raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
@@ -224,12 +233,31 @@ module SurrealDB
         end
       end
 
+      # Live queries and attached sessions end with the connection, so a
+      # kill or detach the connection dropped under has done its job.
+      def ends_with_connection?(method, session)
+        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
+      end
+
+      def ended_with_connection(method, params, session)
+        method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
+      end
+
       # A live query ends with the connection it was started on, so a kill
       # the connection dropped under has done its job either way, as long as
       # the reconnect does not start the live query again.
       def kill_lost(id)
         live = @state_mutex.synchronize { @lives.delete(id.to_s) }
         @inner.remove_notification_handler(live[:current].to_s) if live
+        ensure_connected!
+        nil
+      end
+
+      # The same goes for a detach: the session ended with the connection, so
+      # forget it and its live queries rather than restoring them.
+      def detach_lost(session)
+        @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
+        forget_lives(session)
         ensure_connected!
         nil
       end
@@ -296,17 +324,21 @@ module SurrealDB
           return if @inner.connected?
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
-          @restoring = true
-          begin
-            reconnect!
-            @generation += 1
-            restore_sessions
-            restore_live_queries
-          ensure
-            @restoring = false
-          end
+          reconnect!
+          restore_state
           log(:info, 'Reconnected')
         end
+      end
+
+      # Brings the state the server lost back on the new connection. Its
+      # transactions are gone, so they belong to the previous generation.
+      def restore_state
+        @restoring = true
+        @generation += 1
+        restore_sessions
+        restore_live_queries
+      ensure
+        @restoring = false
       end
 
       # A request made while a reconnect is restoring sessions would reach a
@@ -347,79 +379,6 @@ module SurrealDB
       rescue ConnectionError => e
         log(:warn, "Reconnection attempt #{attempt} failed: #{e.message}")
         false
-      end
-
-      # One session failing to restore does not stop the others.
-      def restore_sessions
-        begin
-          restore_session(nil, @inner.session_state(nil))
-        rescue ServerError => e
-          log(:error, "Could not restore the default session: #{e.message}")
-        end
-        @inner.attached_sessions.each do |id, state|
-          @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
-          restore_session(id, state)
-        rescue ServerError => e
-          log(:error, "Could not restore session #{id}: #{e.message}")
-        end
-      end
-
-      def restore_session(id, state)
-        state = state.copy
-        restore_auth(id, state)
-        @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id) if
-          state.namespace || state.database
-        state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
-      end
-
-      # Re-presents the token; when the server no longer accepts it (it
-      # expired while we were away), uses the refresh token, or signs in again
-      # with the credentials the session last signed in with. A signup is
-      # never repeated. A session that cannot authenticate again is left
-      # signed out, and the rest of its state is still restored.
-      def restore_auth(id, state)
-        return unless state.access_token
-
-        @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
-      rescue ServerError => e
-        return drop_auth(id, e) unless state.renewable?
-
-        log(:info, "Stored token rejected after reconnect (#{e.message}); renewing it")
-        renew_auth(id, state)
-      end
-
-      def renew_auth(id, state)
-        if state.refresh_token
-          begin
-            return @inner.send_request(Protocol::Methods::REFRESH, [state.tokens], session: id)
-          rescue ServerError => e
-            return drop_auth(id, e) unless state.signin
-          end
-        end
-        @inner.send_request(*state.signin, session: id)
-      rescue ServerError => e
-        drop_auth(id, e)
-      end
-
-      # Forgets the credentials, so the session state says what the server
-      # now has: an unauthenticated session.
-      def drop_auth(id, error)
-        @state_mutex.synchronize { @auth_lost[id] = @generation }
-        log(:warn, "#{id ? "Session #{id}" : 'The default session'} could not authenticate again after " \
-                   "reconnecting (#{error.message}); it is now signed out")
-        @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
-      end
-
-      def restore_live_queries
-        lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
-        lives.each do |key, live|
-          @inner.remove_notification_handler(live[:current].to_s)
-          fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          @state_mutex.synchronize { @lives[key][:current] = fresh if @lives.key?(key) }
-          @inner.on_notification(fresh.to_s, relabel(key, live[:handler])) if live[:handler]
-        rescue ServerError => e
-          log(:error, "Could not restore live query #{key}: #{e.message}")
-        end
       end
     end
   end

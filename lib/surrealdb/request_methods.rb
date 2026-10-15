@@ -19,18 +19,27 @@ module SurrealDB
     #
     # Either can be left as it is or cleared: a String selects it, `nil`
     # clears it, and {SurrealDB::NONE} (the default) leaves it unchanged.
+    # A database needs a namespace, so clearing the namespace clears the
+    # database too.
     #
     # @example
     #   db.use("app", "prod")       # both
     #   db.use("app")               # namespace only; the database is unchanged
     #   db.use(database: "staging") # database only
     #   db.use(database: nil)       # clear the database
+    #   db.use(namespace: nil)      # clear both
     # @param ns [String, nil, None] namespace
     # @param db [String, nil, None] database
     # @param namespace [String, nil, None] namespace, as a keyword
     # @param database [String, nil, None] database, as a keyword
     # @return [Hash{String => String, nil}] the resulting "namespace" and "database"
+    # @raise [ArgumentError] when clearing the namespace but selecting a database
     def use(ns = NONE, db = NONE, namespace: ns, database: db)
+      if namespace.nil?
+        raise ArgumentError, 'cannot select a database without a namespace' if database.is_a?(String)
+
+        database = nil
+      end
       result = rpc(Protocol::Methods::USE, [namespace, database])
       state = request_state
       { 'namespace' => state&.namespace, 'database' => state&.database }.tap do |current|
@@ -321,14 +330,21 @@ module SurrealDB
       Connections::HTTPEndpoint.raise_for(response, 'import') unless ok
     end
 
-    # An unreadable answer to a successful import cannot show that every
-    # statement succeeded, so it is an error rather than an empty list.
+    # An answer to a successful import that is not a list of statement
+    # results cannot show that every statement succeeded, so it is an error
+    # rather than an empty list.
     def import_failures(body, succeeded)
-      Array(CBOR::Decoder.decode(body)).select { |r| r.is_a?(Hash) && r['status'] == 'ERR' }
-    rescue StandardError => e
-      raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+      results = begin
+        CBOR::Decoder.decode(body)
+      rescue StandardError => e
+        raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+      end
+      unless results.is_a?(Array) && results.all?(Hash)
+        raise ProtocolError, "the import's result is not a list of statement results" if succeeded
 
-      []
+        return []
+      end
+      results.select { |r| r['status'] == 'ERR' }
     end
 
     # Commits after the block returns normally. Anything else (an exception,
