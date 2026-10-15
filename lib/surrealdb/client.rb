@@ -172,17 +172,6 @@ module SurrealDB
       @connection.send_request(Protocol::Methods::SESSIONS)
     end
 
-    # --- Generic RPC ---
-
-    # Sends an arbitrary RPC method call. Useful as an escape hatch for
-    # server methods not yet wrapped by the SDK.
-    # @param method [String] RPC method name
-    # @param params [Array] method parameters
-    # @return [Object] decoded result
-    def send_rpc(method, params = [])
-      @connection.send_request(method, params)
-    end
-
     private
 
     # Asks the server for its version, on the given connection (a reconnect
