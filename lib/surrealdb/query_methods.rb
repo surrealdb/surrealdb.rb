@@ -106,16 +106,21 @@ module SurrealDB
     # {#query_raw} to see every statement's outcome, including the ones that
     # succeeded alongside a failure.
     #
+    # Variables can be given as a Hash or as keywords. `timeout:` is the call
+    # timeout, so a variable named `timeout` must go in the Hash.
+    #
     # @example
     #   db.query("RETURN 1; SELECT * FROM person") # => [1, [{...}, ...]]
+    #   db.query("SELECT * FROM person WHERE age > $min", min: 18)
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
+    # @param named [Hash] more query variables, as keywords
     # @return [Array] one result per statement
     # @raise [ServerError] when a statement fails
     # @raise [TimeoutError] when the result does not arrive in time
-    def query(sql, vars = {}, timeout: nil)
-      query_raw(sql, vars, timeout: timeout).map do |statement|
+    def query(sql, vars = {}, timeout: nil, **named)
+      query_raw(sql, vars, timeout: timeout, **named).map do |statement|
         raise statement.to_error if statement.error?
 
         statement.result
@@ -129,8 +134,10 @@ module SurrealDB
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @param timeout [Numeric, nil] seconds to wait for the result (see {#with_timeout})
+    # @param named [Hash] more query variables, as keywords (see {#query})
     # @return [Array<QueryResult>]
-    def query_raw(sql, vars = {}, timeout: nil)
+    def query_raw(sql, vars = {}, timeout: nil, **named)
+      vars = vars.merge(named) unless named.empty?
       params = [sql]
       params << vars unless vars.empty?
       raw = rpc(Protocol::Methods::QUERY, params, timeout: timeout)

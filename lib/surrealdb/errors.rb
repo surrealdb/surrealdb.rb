@@ -26,6 +26,11 @@ module SurrealDB
   # Raised when a committed or cancelled transaction is used.
   class TransactionError < Error; end
 
+  # A session's credentials expired, or were lost with the connection, and
+  # could not be renewed. The request was not sent, rather than running it
+  # without the identity the caller expects.
+  class AuthenticationError < Error; end
+
   # Raised by {Client#connect} when the server's version is outside the
   # range this SDK supports (see {ServerVersion}).
   class UnsupportedVersionError < Error

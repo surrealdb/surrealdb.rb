@@ -93,6 +93,20 @@ RSpec.describe SurrealDB::Connections::WebSocket do
     end
   end
 
+  context 'when a TLS server stalls partway through a record' do
+    it 'still gives up at the deadline instead of blocking in a read' do
+      connection = described_class.new('wss://db.example.com', connect_timeout: 0.3)
+      tcp = instance_double(IO, wait_readable: true) # bytes arrived, but not a whole TLS record
+      ssl = instance_double(OpenSSL::SSL::SSLSocket, to_io: tcp)
+      allow(ssl).to receive(:read_nonblock).and_raise(OpenSSL::SSL::SSLErrorWaitReadable)
+      allow(ssl).to receive(:readpartial) { sleep 5 }
+      connection.instance_variable_set(:@socket, ssl)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.3
+      expect { Timeout.timeout(2) { connection.send(:wait_for_open, deadline) } }
+        .to raise_error(SurrealDB::ConnectionError, /handshake timed out/)
+    end
+  end
+
   it 'defaults connect_timeout to the request timeout' do
     expect(described_class.new('ws://localhost:1', timeout: 7).connect_timeout).to eq(7)
   end
