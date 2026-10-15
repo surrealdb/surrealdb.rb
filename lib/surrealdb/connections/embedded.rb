@@ -69,6 +69,10 @@ module SurrealDB
         raise UnsupportedError, 'import, export and health are not available on embedded connections'
       end
 
+      def http_request(*)
+        http_endpoint
+      end
+
       # @param live_query_id [String]
       # @param handler [Proc, Queue]
       def on_notification(live_query_id, handler)

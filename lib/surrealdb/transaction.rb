@@ -57,6 +57,14 @@ module SurrealDB
       @state == :cancelled
     end
 
+    # Whether the connection dropped while the transaction was open, which
+    # ends it on the server: nothing in it was committed, unless a commit
+    # was in flight, in which case it is not known whether it took effect.
+    # @return [Boolean]
+    def lost?
+      @state == :lost
+    end
+
     def inspect
       "#<SurrealDB::Transaction #{@id} #{@state}>"
     end
@@ -66,15 +74,29 @@ module SurrealDB
     def finish(method, state)
       raise TransactionError, "transaction #{@id} is already #{@state}" unless open?
 
-      @connection.send_request(method, [@id], session: @session)
+      request(method, [@id])
       @state = state
       nil
+    end
+
+    # The server cancelled the transaction (the session was reset).
+    def discard
+      @state = :cancelled if open?
     end
 
     def rpc(method, params = [])
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 
-      @connection.send_request(method, params, session: @session, txn: @id)
+      request(method, params, txn: @id)
+    end
+
+    # A transaction does not outlive its connection, so once a request
+    # through it is interrupted the transaction is over.
+    def request(method, params, **)
+      @connection.send_request(method, params, session: @session, **)
+    rescue RequestInterruptedError
+      @state = :lost
+      raise
     end
   end
 end

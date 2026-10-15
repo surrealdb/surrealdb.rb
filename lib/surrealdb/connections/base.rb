@@ -51,7 +51,7 @@ module SurrealDB
       # @param txn [Uuid, nil] transaction to run the request in
       # @return [Object] decoded result
       def send_request(method, params = [], session: nil, txn: nil)
-        renew_tokens(session) if @renew_tokens && !NO_RENEWAL.include?(method)
+        renew_before(method, session) unless NO_RENEWAL.include?(method)
         result = execute(method, params, session: session, txn: txn)
         track_request(method, params, result, session)
         result
@@ -87,6 +87,16 @@ module SurrealDB
         @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
       end
 
+      # Sends a request to one of the server's HTTP routes (/import, /export)
+      # with a session's namespace, database and credentials, renewing its
+      # access token first as {#send_request} does.
+      # @param session [Uuid, nil]
+      # @return [Net::HTTPResponse]
+      def http_request(verb, path, session: nil, **, &)
+        renew_before(path, session)
+        http_endpoint.request(verb, path, state: session_state(session), **, &)
+      end
+
       # Asks the server's HTTP /health route whether it is up and its storage
       # is reachable.
       # @return [void]
@@ -96,6 +106,13 @@ module SurrealDB
         response = http_endpoint.request(:get, '/health')
         HTTPEndpoint.raise_for(response, 'health check') unless response.is_a?(Net::HTTPSuccess)
         nil
+      end
+
+      # Whether the server answers `sessions` (listing attached sessions) on
+      # this connection.
+      # @return [Boolean]
+      def supports_session_listing?
+        true
       end
 
       # What the client has told a session so far.
@@ -137,6 +154,21 @@ module SurrealDB
       # session does not silently lose its credentials: with the refresh
       # token when there is one, otherwise by signing in again with the
       # credentials it last signed in with.
+      # Renews the session's token if it is about to expire. Losing the
+      # connection while renewing means the request itself was never sent,
+      # so it is reported as NotConnectedError, which is safe to retry,
+      # rather than as an error from the request.
+      def renew_before(request, session)
+        return unless @renew_tokens
+
+        renew_tokens(session)
+      rescue NotConnectedError
+        raise
+      rescue ConnectionError => e
+        raise NotConnectedError, "connection lost while renewing the access token (#{e.message}); " \
+                                 "'#{request}' was not sent"
+      end
+
       def renew_tokens(session)
         state = session_state(session)
         return unless state&.expiring?(@token_refresh_margin) && state.renewable?
