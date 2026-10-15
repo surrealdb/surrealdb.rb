@@ -68,7 +68,7 @@ RSpec.describe SurrealDB::RecordID do
 
     it 'round-trips tables and ids that contain escaped characters' do
       [
-        ["a\u27E9b", 'x'], ['t', "x\u27E9y"], ['t', 'a\\b'], ['t', "two\nlines"], ["a\\\u27E9", "\u27E9"]
+        ["a\u27E9b", 'x'], ['t', "x\u27E9y"], ['t', 'a\\b'], ['t', "two\nlines"], ['t', "a\bb"], ["a\\\u27E9", "\u27E9"]
       ].each do |table, id|
         rid = described_class.new(table, id)
         expect(described_class.parse(rid.to_s)).to eq(rid)
@@ -79,6 +79,8 @@ RSpec.describe SurrealDB::RecordID do
       expect(described_class.parse("t:\u27E8a\\\u27E9b\u27E9").id).to eq("a\u27E9b")
       expect(described_class.parse('`a\\`b`:x').table).to eq('a`b')
       expect(described_class.parse("t:\u27E8\\u{41}\\t\u27E9").id).to eq("A\t")
+      expect(described_class.parse("t:\u27E8a\\bb\u27E9").id).to eq("a\bb")
+      expect(described_class.new('t', "a\bb").to_s).to eq("t:\u27E8a\\u{8}b\u27E9")
     end
 
     it 'rejects a unicode escape that does not name a character' do

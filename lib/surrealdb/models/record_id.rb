@@ -14,9 +14,12 @@ module SurrealDB
     IDENT = /\A[a-zA-Z0-9_]+\z/
 
     # Escape sequences SurrealQL writes inside ⟨...⟩ and `...`, other than
-    # a backslash before the character itself.
-    ESCAPES = { '\\' => '\\\\', "\0" => '\\0', "\r" => '\\r', "\t" => '\\t', "\n" => '\\n', "\f" => '\\f' }.freeze
-    UNESCAPES = { '0' => "\0", 'r' => "\r", 't' => "\t", 'n' => "\n", 'f' => "\f" }.freeze
+    # a backslash before the character itself. It writes a backspace as
+    # \u{8} but reads \b too.
+    ESCAPES = {
+      '\\' => '\\\\', "\0" => '\\0', "\r" => '\\r', "\t" => '\\t', "\n" => '\\n', "\f" => '\\f', "\b" => '\\u{8}'
+    }.freeze
+    UNESCAPES = { '0' => "\0", 'r' => "\r", 't' => "\t", 'n' => "\n", 'f' => "\f", 'b' => "\b" }.freeze
 
     # @return [String] table name
     attr_reader :table
@@ -176,7 +179,7 @@ module SurrealDB
     def escape_ident(str)
       return str if str.match?(IDENT) && !str.match?(/\A\d+\z/)
 
-      "⟨#{str.gsub(/[\\\0\r\t\n\f⟩]/) { |c| ESCAPES.fetch(c, "\\#{c}") }}⟩"
+      "⟨#{str.gsub(/[\\\0\r\t\n\f\b⟩]/) { |c| ESCAPES.fetch(c, "\\#{c}") }}⟩"
     end
 
     def format_object_id(obj)
