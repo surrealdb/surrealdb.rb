@@ -79,5 +79,11 @@ module SurrealDB
 
       @connection.send_request(method, params, session: @session, txn: @id, **timeout_option(timeout))
     end
+
+    def stream_rpc(method, params, timeout, &)
+      raise TransactionError, "transaction #{@id} is #{@state}" unless open?
+
+      @connection.stream_request(method, params, session: @session, txn: @id, **timeout_option(timeout), &)
+    end
   end
 end

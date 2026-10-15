@@ -39,11 +39,32 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
         @handlers[id] = handler
       end
 
+      def supports_streaming?
+        true
+      end
+
       def remove_notification_handler(id)
         @handlers.delete(id)
       end
 
       protected
+
+      # Streams two frames; a queued failure strikes before the first frame
+      # (NotConnectedError) or between the two (anything else).
+      def execute_stream(method, params, session: nil, txn: nil, **)
+        @calls << [method, params, session, txn]
+        failure = @failures.shift
+        if failure.is_a?(SurrealDB::NotConnectedError)
+          @connected = false
+          raise failure
+        end
+        yield({ 'stream' => 'begin' })
+        if failure
+          @connected = false
+          raise failure
+        end
+        yield({ 'stream' => 'end' })
+      end
 
       def execute(method, params, session: nil, txn: nil)
         @calls << [method, params, session, txn]
@@ -224,6 +245,30 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('kill', [original])
       expect(inner.calls.last).to eq(['kill', [new_id], nil, nil])
+    end
+  end
+
+  describe '#stream_request' do
+    def frames
+      [].tap { |seen| reliable.stream_request('query_stream', ['SELECT 1']) { |f| seen << f['stream'] } }
+    end
+
+    it 'starts a stream that never left on the new connection' do
+      reliable
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect(frames).to eq(%w[begin end])
+      expect(inner.connects).to eq(2)
+    end
+
+    it 'does not restart a stream the connection dropped under' do
+      reliable
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      seen = []
+      expect { reliable.stream_request('query_stream', ['SELECT 1']) { |f| seen << f['stream'] } }
+        .to raise_error(SurrealDB::RequestInterruptedError)
+      expect(seen).to eq(%w[begin])
+      expect(methods_sent.count('query_stream')).to eq(1)
+      expect(reliable).to be_connected
     end
   end
 

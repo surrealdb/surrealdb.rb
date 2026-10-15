@@ -63,6 +63,11 @@
 
 ### Added
 
+- `query_stream` yields a query's results as `QueryChunk`s while the server produces them
+  (`query_stream` RPC, WebSocket, SurrealDB 3.1+), on a client, session or transaction.
+  Leaving the block early sends `query_cancel`. Other connections and older servers run the
+  query buffered and yield the same chunks.
+
 - Per-call timeouts: `query`, `query_raw` and `send_rpc` take `timeout:`, and
   `with_timeout(seconds) { ... }` applies a timeout to every request in the block on that
   connection, including its sessions and transactions.

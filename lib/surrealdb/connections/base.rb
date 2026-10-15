@@ -71,6 +71,38 @@ module SurrealDB
         false
       end
 
+      # Whether this connection can stream query results as the server
+      # produces them (see {#stream_request}).
+      # @return [Boolean]
+      def supports_streaming?
+        false
+      end
+
+      # Records that the server does not offer streaming (it answered
+      # `query_stream` with "method not found"), so later queries skip it.
+      def streaming_unavailable!
+        @streaming_unavailable = true
+      end
+
+      # Sends a request the server answers with a sequence of frames, such as
+      # `query_stream`, yielding each frame's result as it arrives. Returns
+      # after the server's final `end` frame.
+      #
+      # Leaving the block early (break, return or an exception) asks the
+      # server to stop the stream.
+      #
+      # @yield [Hash] each frame's result
+      # @return [void]
+      # @raise [UnsupportedError] when the connection cannot stream
+      # @raise [ServerError] when the server refuses the request
+      # @raise [TimeoutError] when no frame arrives within the timeout
+      def stream_request(method, params = [], session: nil, txn: nil, timeout: nil, &)
+        raise UnsupportedError, "#{self.class.name} cannot stream results" unless supports_streaming?
+
+        renew_tokens(session) if @renew_tokens
+        execute_stream(method, params, session: session, txn: txn, timeout: timeout, &)
+      end
+
       # Whether this connection supports attached sessions. The server keeps
       # attached sessions for WebSocket and HTTP alike.
       # @return [Boolean]
@@ -119,6 +151,11 @@ module SurrealDB
       # Performs one request on the transport.
       # @return [Object] decoded result
       def execute(method, params, session: nil, txn: nil, timeout: nil)
+        raise NotImplementedError
+      end
+
+      # Performs one streaming request on the transport.
+      def execute_stream(method, params, session: nil, txn: nil, timeout: nil)
         raise NotImplementedError
       end
 

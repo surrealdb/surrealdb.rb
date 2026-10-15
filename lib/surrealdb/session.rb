@@ -70,5 +70,11 @@ module SurrealDB
 
       connection.send_request(method, params, session: @id, **timeout_option(timeout))
     end
+
+    def stream_rpc(method, params, timeout, &)
+      raise SessionError, "session #{@id} is closed" if @closed
+
+      connection.stream_request(method, params, session: @id, **timeout_option(timeout), &)
+    end
   end
 end

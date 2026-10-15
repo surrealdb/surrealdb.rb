@@ -88,6 +88,36 @@ module SurrealDB
         true
       end
 
+      def supports_streaming?
+        @inner.supports_streaming?
+      end
+
+      def streaming_unavailable!
+        @inner.streaming_unavailable!
+      end
+
+      # A stream that never started is started on the new connection; one
+      # the connection dropped under is not restarted, since its statements
+      # may have run.
+      def stream_request(method, params = [], session: nil, txn: nil, timeout: nil, &)
+        await_restore
+        check_transaction_alive(txn)
+        options = { session: session, txn: txn }
+        options[:timeout] = timeout if timeout
+        begin
+          @inner.stream_request(method, params, **options, &)
+        rescue NotConnectedError
+          ensure_connected!
+          check_transaction_alive(txn)
+          @inner.stream_request(method, params, **options, &)
+        end
+      rescue NotConnectedError, RequestInterruptedError
+        raise
+      rescue ConnectionError => e
+        ensure_connected!
+        raise_interrupted(method, e)
+      end
+
       def http_endpoint
         @inner.http_endpoint
       end

@@ -652,3 +652,65 @@ RSpec.shared_examples 'call timeouts' do
     quick&.close
   end
 end
+
+RSpec.shared_examples 'query streaming' do
+  let(:table) { unique_table('stream') }
+
+  after { client.close }
+
+  before do
+    client.query("DEFINE TABLE #{table} SCHEMALESS; FOR $i IN 1..=5 { CREATE type::record($t, $i) SET n = $i }",
+                 { 't' => table })
+  end
+
+  def rows_of(chunks, index)
+    chunks.select { |c| c.index == index && c.rows? }.flat_map(&:values)
+  end
+
+  it 'yields rows, values and a finished chunk per statement' do
+    chunks = []
+    client.query_stream("SELECT n FROM #{table} ORDER BY n; RETURN 7") { |chunk| chunks << chunk }
+
+    expect(rows_of(chunks, 0)).to eq((1..5).map { |n| { 'n' => n } })
+    expect(chunks.select { |c| c.index == 1 }.map(&:kind)).to eq(%i[value finished])
+    expect(chunks.find { |c| c.index == 1 && c.kind == :value }.value).to eq(7)
+    expect(chunks.select(&:finished?).map(&:index)).to eq([0, 1])
+    expect(chunks.select(&:finished?).map(&:time)).to all(be_a(String))
+  end
+
+  it 'yields the same results as query' do
+    sql = "SELECT * FROM #{table} WHERE n > $min ORDER BY n; RETURN 'x'"
+    chunks = client.query_stream(sql, { 'min' => 2 }).to_a # an Enumerator without a block
+    expect([rows_of(chunks, 0), chunks.find { |c| c.index == 1 && !c.finished? }.value])
+      .to eq(client.query(sql, { 'min' => 2 }))
+  end
+
+  it 'reports a failed statement on its chunk, then raises its error' do
+    chunks = []
+    expect { client.query_stream("RETURN 1; THROW 'boom'; RETURN 3") { |chunk| chunks << chunk } }
+      .to raise_error(SurrealDB::ThrownError, /boom/)
+    failed = chunks.find { |c| c.index == 1 && c.finished? }
+    expect(failed.error).to be_a(SurrealDB::ThrownError)
+    expect(chunks.select(&:finished?).map(&:index)).to eq([0, 1, 2]) # later statements still ran
+  end
+
+  it 'stops early when the block breaks, leaving the connection usable' do
+    client.query('FOR $i IN 6..=3000 { CREATE type::record($t, $i) SET n = $i }', { 't' => table })
+    seen = 0
+    client.query_stream("SELECT * FROM #{table}; RETURN 'never needed'") do |chunk|
+      seen += 1
+      break if chunk.rows?
+    end
+    expect(seen).to eq(1)
+    expect(client.query('RETURN 42')).to eq([42])
+  end
+
+  it 'streams in a session' do
+    session = client.fork_session
+    session.set('limit', 2)
+    chunks = session.query_stream("SELECT n FROM #{table} ORDER BY n LIMIT $limit").to_a
+    expect(rows_of(chunks, 0)).to eq([{ 'n' => 1 }, { 'n' => 2 }])
+  ensure
+    session&.close
+  end
+end
