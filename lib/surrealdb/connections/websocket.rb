@@ -56,12 +56,12 @@ module SurrealDB
         @socket = open_socket(uri, deadline)
         ws_url = build_ws_url(uri)
 
-        @driver = ::WebSocket::Driver.client(SocketWrapper.new(@socket, ws_url), protocols: ['cbor'])
+        @wrapper = SocketWrapper.new(@socket, ws_url)
+        @driver = ::WebSocket::Driver.client(@wrapper, protocols: ['cbor'])
         setup_driver_handlers
 
-        @driver.start
-
         begin
+          send_upgrade(deadline)
           wait_for_open(deadline)
         rescue StandardError
           @socket&.close
@@ -242,6 +242,19 @@ module SurrealDB
         end
       end
 
+      # The upgrade request is written within the connect deadline too: a
+      # peer that does not read would otherwise block the write.
+      def send_upgrade(deadline)
+        @wrapper.deadline = deadline
+        @driver.start
+      rescue SocketWrapper::WriteTimeout
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
+      rescue SystemCallError, IOError, OpenSSL::SSL::SSLError => e
+        raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
+      ensure
+        @wrapper.deadline = nil
+      end
+
       def wait_for_open(deadline)
         loop do
           data = read_handshake(deadline)
@@ -275,6 +288,8 @@ module SurrealDB
           wait_for_handshake(:wait_writable, deadline)
         rescue EOFError
           return nil
+        rescue SystemCallError, OpenSSL::SSL::SSLError => e
+          raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
         end
       end
 
@@ -390,21 +405,6 @@ module SurrealDB
 
         response = @rpc.decode_response(result)
         Protocol::Response.extract_result(response)
-      end
-
-      # Minimal wrapper that gives websocket-driver the interface it expects:
-      # #url for the request URL, and #write for sending bytes.
-      class SocketWrapper
-        attr_reader :url
-
-        def initialize(socket, url)
-          @socket = socket
-          @url = url
-        end
-
-        def write(data)
-          @socket.write(data)
-        end
       end
     end
   end
