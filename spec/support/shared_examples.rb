@@ -387,6 +387,16 @@ RSpec.shared_examples 'import and export' do
     expect(chunks.join).to include('Streamy')
   end
 
+  it 'passes on an error the export block raises, not as a connection error' do
+    expect { client.export { |_chunk| raise Errno::ENOSPC } }.to raise_error(Errno::ENOSPC)
+  end
+
+  it 'refuses import and export once the client is closed' do
+    client.close
+    expect { client.export }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+  end
+
   it 'round-trips an export through an import' do
     client.create(rid('rt'), { 'name' => 'Round', 'tags' => %w[a b] })
     sql = client.export(tables: [table])
