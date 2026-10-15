@@ -151,7 +151,7 @@ module SurrealDB
         result
       end
 
-      def track_live(method, params, session, result)
+      def track_live(method, params, session, result) # rubocop:disable Metrics/CyclomaticComplexity
         case method
         when Protocol::Methods::BEGIN_TXN
           @state_mutex.synchronize { @transactions[result.to_s] = @generation }
@@ -162,7 +162,19 @@ module SurrealDB
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
+        when Protocol::Methods::DETACH then forget_lives(session) if session
         end
+      end
+
+      # The session's live queries ended with it on the server; drop them and
+      # their handlers, which would otherwise never run again but stay
+      # reachable, and would be restored into a session that no longer exists.
+      def forget_lives(session)
+        gone = @state_mutex.synchronize do
+          keys = @lives.select { |_, live| live[:session] == session }.keys
+          keys.map { |key| @lives.delete(key) }
+        end
+        gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
 
       # A transaction lives on the connection it began on; once that is gone,
