@@ -67,10 +67,10 @@ module SurrealDB
       @closed = true
     end
 
-    def rpc(method, params = [])
+    def rpc(method, params = [], timeout: nil)
       raise SessionError, "session #{@id} is closed" if @closed
 
-      connection.send_request(method, params, session: @id)
+      connection.send_request(method, params, session: @id, **timeout_option(timeout))
     end
   end
 end

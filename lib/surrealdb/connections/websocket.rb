@@ -114,7 +114,7 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil, txn: nil)
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
         raise NotConnectedError, 'not connected' unless @connected
 
         id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
@@ -122,19 +122,17 @@ module SurrealDB
 
         @mutex.synchronize { @pending[id] = entry }
 
+        timeout ||= @timeout
+        deadline = monotonic_now + timeout
         begin
-          write_frame(encoded)
-          wait_for_response(entry)
+          write_frame(encoded, deadline, method)
+          wait_for_response(entry, deadline, timeout)
         ensure
           @mutex.synchronize { @pending.delete(id) }
         end
       end
 
       private
-
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
 
       def build_ws_url(uri)
         path = uri.path.empty? ? '/rpc' : uri.path
@@ -340,12 +338,13 @@ module SurrealDB
 
       # Waits for the reader thread to deliver a response into the entry,
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
-      def wait_for_response(entry)
+      # Waits for the response until the request's deadline, which writing
+      # the request has already used part of.
+      def wait_for_response(entry, deadline, timeout)
         result = @mutex.synchronize do
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
           while entry[:result].nil?
-            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            raise TimeoutError, "request timed out after #{@timeout}s" if remaining <= 0
+            remaining = deadline - monotonic_now
+            raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)
           end
@@ -360,8 +359,20 @@ module SurrealDB
 
       # A frame the socket refused was not sent, so the request is safe to
       # send again: report it as NotConnectedError, not as an interruption.
-      def write_frame(encoded)
-        @write_mutex.synchronize { @driver.binary(encoded) }
+      # Writing counts against the request's deadline. A frame that could
+      # not be written in time was not received whole, so the server did
+      # not run it; but part of it may have gone out, which leaves the
+      # connection unusable.
+      def write_frame(encoded, deadline, method)
+        @write_mutex.synchronize do
+          @wrapper.deadline = deadline
+          @driver.binary(encoded)
+        ensure
+          @wrapper.deadline = nil
+        end
+      rescue SocketWrapper::WriteTimeout
+        connection_lost('write timed out')
+        raise TimeoutError.new("'#{method}' timed out while it was being sent", sent: false)
       rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
         connection_lost("write failed: #{e.class}: #{e.message}")
         raise NotConnectedError, "not connected (#{e.message})"

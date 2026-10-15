@@ -246,6 +246,24 @@ RSpec.describe SurrealDB::Client do
       expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
     end
 
+    it 'is lost when a request through it times out, as it may still be running' do
+      allow(connection).to receive(:send_request).with('query', any_args).and_raise(SurrealDB::TimeoutError, 'slow')
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::TimeoutError)
+      expect(tx).not_to be_open
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
+    end
+
+    it 'stays open when a request through it timed out before it was sent' do
+      not_sent = SurrealDB::TimeoutError.new('timed out renewing the access token', sent: false)
+      allow(connection).to receive(:send_request).with('query', any_args).and_raise(not_sent)
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::TimeoutError)
+      expect(tx).to be_open
+      tx.commit
+      expect(connection).to have_received(:send_request).with('commit', [txn_id], session: nil)
+    end
+
     it 'refuses requests after the transaction is finished' do
       tx = client.begin_transaction
       tx.commit
@@ -406,6 +424,127 @@ RSpec.describe SurrealDB::Client, '#use' do
   it 'refuses a database without a namespace' do
     expect { client.use(nil, 'prod') }.to raise_error(ArgumentError, /without a namespace/)
     expect(client.connection).not_to have_received(:send_request)
+  end
+end
+
+RSpec.describe SurrealDB::Client, '#with_timeout' do
+  let(:connection) do
+    instance_double(SurrealDB::Connections::WebSocket, supports_transactions?: true, supports_sessions?: true)
+  end
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before do
+    client.instance_variable_set(:@connection, connection)
+    allow(connection).to receive(:send_request).and_return([])
+  end
+
+  it 'passes a call timeout to the connection, and none otherwise' do
+    client.query('RETURN 1', timeout: 2)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 1'], timeout: 2)
+    client.query('RETURN 2')
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 2'])
+  end
+
+  it 'still takes query variables as keywords' do
+    client.query('RETURN $min', min: 1)
+    client.query_raw('RETURN $a + $b', { 'a' => 1 }, b: 2, timeout: 4)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN $min', { min: 1 }])
+    expect(connection).to have_received(:send_request)
+      .with('query', ['RETURN $a + $b', { 'a' => 1, b: 2 }], timeout: 4)
+  end
+
+  it 'applies with_timeout to the block, innermost first, and restores it after' do
+    client.with_timeout(5) do
+      client.select('a')
+      client.with_timeout(1) { client.select('b') }
+      client.select('c')
+      client.query('RETURN 3', timeout: 9) # an explicit timeout wins
+    end
+    client.select('d')
+
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('a')], timeout: 5)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('b')], timeout: 1)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('c')], timeout: 5)
+    expect(connection).to have_received(:send_request).with('query', ['RETURN 3'], timeout: 9)
+    expect(connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('d')])
+  end
+
+  it 'covers sessions and transactions on the same connection' do
+    allow(connection).to receive(:send_request).with('begin', [], any_args).and_return(SurrealDB::Uuid.v4)
+    session = client.new_session
+    tx = client.begin_transaction
+    client.with_timeout(3) do
+      session.select('s')
+      tx.select('t')
+    end
+    expect(connection).to have_received(:send_request)
+      .with('select', [SurrealDB::Table.new('s')], session: session.id, timeout: 3)
+    expect(connection).to have_received(:send_request)
+      .with('select', [SurrealDB::Table.new('t')], session: nil, txn: tx.id, timeout: 3)
+  end
+
+  it 'does not leak to other connections' do
+    other = described_class.new('ws://localhost:8000')
+    other_connection = instance_double(SurrealDB::Connections::WebSocket)
+    other.instance_variable_set(:@connection, other_connection)
+    allow(other_connection).to receive(:send_request).and_return([])
+    client.with_timeout(3) { other.select('x') }
+    expect(other_connection).to have_received(:send_request).with('select', [SurrealDB::Table.new('x')])
+  end
+
+  context 'with requests the client sends straight to the connection' do
+    # Records the timeout each request reaches the transport with.
+    let(:connection) do
+      Class.new(SurrealDB::Connections::Base) do
+        attr_reader :timeouts
+
+        def initialize(url)
+          super
+          @timeouts = {}
+          @connected = true
+        end
+
+        protected
+
+        def execute(method, _params, timeout: nil, **)
+          @timeouts[method] = timeout
+          method == 'begin' ? SurrealDB::Uuid.v4 : nil
+        end
+      end.new('ws://localhost:8000')
+    end
+
+    before { allow(connection).to receive(:send_request).and_call_original }
+
+    it 'applies with_timeout to them too: version, sessions and the commit of a transaction' do
+      client.with_timeout(0.3) do
+        client.version
+        client.new_session.close
+        client.transaction { |tx| tx.query_raw('RETURN 1') }
+      end
+      about = a_value_between(0.15, 0.301)
+      expect(connection.timeouts).to include('version' => about, 'attach' => about, 'detach' => about,
+                                             'begin' => about, 'query' => about, 'commit' => about)
+    end
+
+    it 'applies with_timeout to the HTTP routes too: health, import and export' do
+      endpoint = instance_double(SurrealDB::Connections::HTTPEndpoint)
+      allow(endpoint).to receive(:request) do |_verb, path, timeout: nil, **|
+        connection.timeouts[path] = timeout
+        Net::HTTPOK.new('1.1', '200', 'OK')
+      end
+      allow(connection).to receive(:http_endpoint).and_return(endpoint)
+      client.with_timeout(0.3) do
+        client.health
+        connection.http_request(:post, '/import', body: '')
+      end
+      expect(connection.timeouts).to include('/health' => a_value_between(0.15, 0.301),
+                                             '/import' => a_value_between(0.15, 0.301))
+    end
+  end
+
+  it 'refuses a timeout that is not a positive number' do
+    expect { client.with_timeout(0) { nil } }.to raise_error(ArgumentError)
+    expect { client.with_timeout('5') { nil } }.to raise_error(ArgumentError)
   end
 end
 

@@ -78,6 +78,71 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  it 'bounds opening a new socket by the call timeout as well as the response' do
+    server = ScriptedHTTPServer.new(%i[drop ok])
+    http = http_to(server)
+    net = http.instance_variable_get(:@http)
+    seen = nil
+    allow(net).to receive(:connect).and_wrap_original do |original|
+      seen = [net.open_timeout, net.read_timeout]
+      original.call
+    end
+    Timeout.timeout(5) do
+      expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
+      http.send_request('ping', timeout: 0.5) # opens a new socket
+    end
+    expect(seen).to all(be_between(0.35, 0.501))
+    expect([net.open_timeout, net.read_timeout]).to eq([2, 2])
+  ensure
+    http&.close
+    server&.close
+  end
+
+  it 'writes the request and reads the response within the time opening the socket left' do
+    server = ScriptedHTTPServer.new(%i[drop ok])
+    http = http_to(server)
+    net = http.instance_variable_get(:@http)
+    seen = nil
+    allow(net).to receive(:connect).and_wrap_original do |original|
+      sleep 0.3
+      original.call
+    end
+    allow(net).to receive(:request).and_wrap_original do |original, *args|
+      seen = [net.read_timeout, net.write_timeout]
+      original.call(*args)
+    end
+    Timeout.timeout(5) do
+      expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
+      http.send_request('ping', timeout: 1)
+    end
+    expect(seen).to all(be_between(0.4, 0.7))
+  ensure
+    http&.close
+    server&.close
+  end
+
+  it 'opens the socket a stale one is replaced with within the time the call has left' do
+    server = ScriptedHTTPServer.new(%i[ok drop ok])
+    http = http_to(server)
+    net = http.instance_variable_get(:@http)
+    seen = nil
+    allow(net).to receive(:connect).and_wrap_original do |original|
+      seen = net.open_timeout
+      original.call
+    end
+    calls = 0
+    allow(net).to receive(:request).and_wrap_original do |original, *args|
+      sleep 0.4 if (calls += 1) == 2 # the stale socket takes its time to fail
+      original.call(*args)
+    end
+    http.send_request('ping')
+    expect(http.send_request('select', [SurrealDB::Table.new('person')], timeout: 1)).to eq('pong')
+    expect(seen).to be_between(0.4, 0.65)
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'raises ConnectionError when the next request cannot open a new socket' do
     server = ScriptedHTTPServer.new(%i[drop])
     http = http_to(server)

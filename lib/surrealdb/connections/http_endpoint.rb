@@ -34,17 +34,17 @@ module SurrealDB
       # @param body [String, IO, nil]
       # @param headers [Hash{String => String}]
       # @param state [SessionState, nil] supplies the namespace, database and token
+      # @param timeout [Numeric, nil] open, write and read timeout for this request;
+      #   nil for the endpoint's
       # @yield [String] body chunks, when given
       # @return [Net::HTTPResponse]
-      def request(verb, path, body: nil, headers: {}, state: nil, &block)
+      def request(verb, path, body: nil, headers: {}, state: nil, timeout: nil, &block) # rubocop:disable Metrics/ParameterLists
         req = build(verb, path, body, headers, state)
         block &&= guard(block)
-        http = Net::HTTP.new(@base.host, @base.port)
-        http.use_ssl = @base.scheme == 'https'
-        http.open_timeout = @timeout
-        http.write_timeout = @timeout
-        http.read_timeout = @timeout
-        http.start do |conn|
+        timeout ||= @timeout
+        deadline = monotonic_now + timeout
+        net_http(timeout).start do |conn|
+          sending_within(conn, deadline, path)
           conn.request(req) do |response|
             if block && response.is_a?(Net::HTTPSuccess)
               response.read_body(&block)
@@ -56,8 +56,8 @@ module SurrealDB
         end
       rescue BlockError => e
         raise e.original
-      rescue Net::OpenTimeout, Net::WriteTimeout, Net::ReadTimeout => e
-        raise TimeoutError, "HTTP #{path} timed out: #{e.message}"
+      rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout => e
+        raise TimeoutError.new("HTTP #{path} timed out: #{e.message}", sent: sent_before?(e, body))
       rescue SystemCallError, IOError, SocketError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "HTTP #{path} failed: #{e.class}: #{e.message}"
       rescue Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError => e
@@ -119,6 +119,36 @@ module SurrealDB
       private_class_method :error_message
 
       private
+
+      # Nothing reached the server when connecting timed out, nor when
+      # writing a request without a body did; an import applies its body as
+      # it arrives, so part of it may have run.
+      def sent_before?(timeout, body)
+        timeout.is_a?(Net::ReadTimeout) || (timeout.is_a?(Net::WriteTimeout) && !body.nil?)
+      end
+
+      # Opening the connection used part of the time; writing the request and
+      # reading the answer get what is left.
+      def sending_within(conn, deadline, path)
+        left = deadline - monotonic_now
+        raise TimeoutError.new("HTTP #{path} timed out while connecting", sent: false) unless left.positive?
+
+        conn.write_timeout = left
+        conn.read_timeout = left
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def net_http(timeout)
+        Net::HTTP.new(@base.host, @base.port).tap do |http|
+          http.use_ssl = @base.scheme == 'https'
+          http.open_timeout = timeout
+          http.read_timeout = timeout
+          http.write_timeout = timeout
+        end
+      end
 
       def build(verb, path, body, headers, state)
         full = "#{@base.path}#{path}"

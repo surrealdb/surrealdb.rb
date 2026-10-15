@@ -189,8 +189,8 @@ module SurrealDB
 
     # Requests made directly on the client run in the connection's default
     # session.
-    def rpc(method, params = [])
-      @connection.send_request(method, params)
+    def rpc(method, params = [], timeout: nil)
+      @connection.send_request(method, params, **timeout_option(timeout))
     end
 
     def request_session

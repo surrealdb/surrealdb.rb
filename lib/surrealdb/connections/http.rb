@@ -42,6 +42,7 @@ module SurrealDB
         @http.use_ssl = (uri.scheme == 'https')
         @http.open_timeout = @timeout
         @http.read_timeout = @timeout
+        @http.write_timeout = @timeout
 
         @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
 
@@ -84,7 +85,7 @@ module SurrealDB
         Protocol::Methods::REFRESH, Protocol::Methods::REVOKE
       ].freeze
 
-      def execute(method, params, session: nil, txn: nil)
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
         raise ConnectionError, 'not connected' unless @connected
 
         # Without an attached session every HTTP request runs in a fresh server
@@ -99,7 +100,9 @@ module SurrealDB
 
         request = build_request(encoded, session_state(session) || session_state,
                                 bearer: !CREDENTIAL_METHODS.include?(method))
-        response = execute_request(request, repeatable: txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method))
+        response = with_call_timeout(timeout) do
+          execute_request(request, repeatable: txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method))
+        end
 
         decoded = @rpc.decode_response(response.body)
         Protocol::Response.extract_result(decoded)
@@ -146,6 +149,25 @@ module SurrealDB
         req
       end
 
+      # A call's timeout is one deadline for opening a new socket and reading
+      # the response: reading gets the time opening left (see #open_socket).
+      def with_call_timeout(timeout)
+        return yield if timeout.nil?
+
+        @call_deadline = monotonic_now + timeout
+        @http.open_timeout = timeout
+        @http.read_timeout = timeout
+        @http.write_timeout = timeout
+        begin
+          yield
+        ensure
+          @call_deadline = nil
+          @http.open_timeout = @timeout
+          @http.read_timeout = @timeout
+          @http.write_timeout = @timeout
+        end
+      end
+
       # Sends the request on the kept-alive connection.
       #
       # If that socket turns out to be dead (the server closed it while idle,
@@ -180,9 +202,10 @@ module SurrealDB
 
         log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
         transport(request, repeatable: true, retried: true)
-      rescue Net::OpenTimeout, Net::ReadTimeout => e
+      rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout => e
         drop_socket
-        raise TimeoutError, "HTTP request timed out: #{e.message}"
+        # The server runs a request only once it has the whole body.
+        raise TimeoutError.new("HTTP request timed out: #{e.message}", sent: e.is_a?(Net::ReadTimeout))
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
         drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
@@ -196,11 +219,24 @@ module SurrealDB
       def open_socket
         return if @http.started?
 
+        within_deadline(:open_timeout)
         start_http
+        within_deadline(:read_timeout, :write_timeout)
       rescue Net::OpenTimeout => e
-        raise TimeoutError, "HTTP connect timed out: #{e.message}"
+        raise TimeoutError.new("HTTP connect timed out: #{e.message}", sent: false)
       rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
         raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
+      end
+
+      # Gives each phase of a call (opening a socket, again after a stale
+      # one; writing; reading) only the time its deadline has left.
+      def within_deadline(*timeouts)
+        return unless @call_deadline
+
+        left = @call_deadline - monotonic_now
+        raise TimeoutError.new('HTTP request timed out while connecting', sent: false) unless left.positive?
+
+        timeouts.each { |timeout| @http.public_send(:"#{timeout}=", left) }
       end
 
       def start_http

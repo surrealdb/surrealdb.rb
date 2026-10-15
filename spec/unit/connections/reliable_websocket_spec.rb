@@ -5,7 +5,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
   # test script failures with `fail_next`.
   let(:fake_class) do
     Class.new(SurrealDB::Connections::Base) do
-      attr_reader :calls, :connects, :handlers
+      attr_reader :calls, :connects, :handlers, :last_timeout
 
       def initialize(url)
         super
@@ -45,8 +45,9 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       protected
 
-      def execute(method, params, session: nil, txn: nil)
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
         @calls << [method, params, session, txn]
+        @last_timeout = timeout
         unless @failures.empty?
           @connected = false
           raise @failures.shift
@@ -154,6 +155,44 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
         closer.join
         expect(inner).not_to be_connected
       end
+    end
+
+    it 'counts waiting for a reconnect against the call timeout, and leaves the reconnect running' do
+      reliable
+      allow(inner).to receive(:connect).and_wrap_original do |original|
+        sleep 0.3
+        original.call
+      end
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect { reliable.send_request('version', timeout: 0.1) }
+        .to raise_error(SurrealDB::TimeoutError, /'version' timed out waiting for the connection/)
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.25
+      expect(reliable.send_request('version', timeout: 1)).to eq('ok') # waits for the same reconnect
+      expect(inner.last_timeout).to be < 0.9
+      expect(inner.connects).to eq(2)
+    end
+
+    it 'raises what the reconnect failed with to a caller with a timeout' do
+      reliable.on_reconnect { raise SurrealDB::UnsupportedVersionError.new('surrealdb-5.0.0', '3.0.0', '5.0.0') }
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect { reliable.send_request('version', timeout: 1) }.to raise_error(SurrealDB::UnsupportedVersionError)
+    end
+
+    it 'shares one reconnect between the calls that time out waiting for it' do
+      reliable
+      allow(inner).to receive(:connect).and_wrap_original do |original|
+        sleep 0.3
+        original.call
+      end
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      threads = Thread.list.size
+      3.times do
+        expect { reliable.send_request('version', timeout: 0.05) }.to raise_error(SurrealDB::TimeoutError)
+      end
+      expect(Thread.list.size - threads).to be <= 1
+      expect(reliable.send_request('version', timeout: 1)).to eq('ok')
+      expect(inner.connects).to eq(2)
     end
 
     it 'does not reconnect after close' do
@@ -482,7 +521,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       live = reliable.send_request('live', ['person'])
       inner.calls.clear
       inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
-      allow(reliable).to receive(:kill_lost).and_wrap_original do |original, *args|
+      allow(reliable).to receive(:ended_with_connection).and_wrap_original do |original, *args|
         reliable.send(:ensure_connected!) # the background reconnect wins the race
         original.call(*args)
       end
@@ -490,6 +529,55 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       restarted = SurrealDB::Uuid.parse('00000000-0000-4000-8000-000000000002') # its id on the new connection
       expect(methods_sent).to eq(%w[kill live kill])
       expect(inner.calls.last[1]).to eq([restarted])
+    end
+  end
+
+  describe 'a kill the connection dropped under, while a reconnect restores the live query' do
+    it 'kills the query the restore started, whichever finishes first' do
+      live = reliable.send_request('live', ['person'])
+      lost = false
+      allow(inner).to receive(:execute).and_wrap_original do |original, method, params, **options|
+        result = original.call(method, params, **options)
+        # The kill forgets the live query after the restore read it, before
+        # the restore recorded its new id.
+        lost ||= method == 'live' && reliable.send(:kill_lost, live, 0).nil?
+        result
+      end
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+      restarted = SurrealDB::Uuid.parse('00000000-0000-4000-8000-000000000002')
+      expect(lost).to be(true)
+      expect(inner.calls.last(3).map { |call| call.first(2) }).to eq([['live', ['person']], ['kill', [restarted]],
+                                                                      ['version', []]])
+    end
+
+    it 'sends the kill again within the time the call has left' do
+      live = reliable.send_request('live', ['person'])
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      allow(reliable).to receive(:ended_with_connection).and_wrap_original do |original, *args|
+        reliable.send(:ensure_connected!) # the background reconnect wins the race
+        original.call(*args)
+      end
+      reliable.send_request('kill', [live], timeout: 1)
+      expect(methods_sent.last).to eq('kill')
+      expect(inner.last_timeout).to be_between(0.5, 1)
+    end
+  end
+
+  describe 'a detach the connection dropped under, while a reconnect restores the session' do
+    it 'detaches the session the restore attached again' do
+      session = SurrealDB::Uuid.v4
+      reliable.send_request('attach', [], session: session)
+      allow(inner).to receive(:execute).and_wrap_original do |original, method, params, **options|
+        result = original.call(method, params, **options)
+        reliable.send(:detach_lost, session, 0) if method == 'attach'
+        result
+      end
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+      expect(inner.calls.last(3).map { |call| call.values_at(0, 2) }).to eq([['attach', session], ['detach', session],
+                                                                             ['version', nil]])
+      expect(reliable.session_state(session)).to be_nil
     end
   end
 
@@ -529,7 +617,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       reliable.send_request('attach', [], session: session)
       inner.calls.clear
       inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
-      allow(reliable).to receive(:detach_lost).and_wrap_original do |original, *args|
+      allow(reliable).to receive(:ended_with_connection).and_wrap_original do |original, *args|
         reliable.send(:ensure_connected!) # the background reconnect wins the race
         original.call(*args)
       end

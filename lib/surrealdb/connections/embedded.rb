@@ -58,13 +58,13 @@ module SurrealDB
         true
       end
 
-      # An embedded database has no HTTP routes.
       # An embedded engine is healthy while it is open.
       # @return [void]
-      def health
+      def health(**)
         raise ConnectionError, 'not connected' unless @connected
       end
 
+      # An embedded database has no HTTP routes.
       def http_endpoint
         raise UnsupportedError, 'import, export and health are not available on embedded connections'
       end
@@ -86,7 +86,9 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil, txn: nil)
+      # A per-call timeout is not applied: the engine runs the request to its
+      # own query timeout.
+      def execute(method, params, session: nil, txn: nil, timeout: nil) # rubocop:disable Lint/UnusedMethodArgument
         raise ConnectionError, 'not connected' unless @connected
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)

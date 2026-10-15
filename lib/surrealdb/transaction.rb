@@ -19,6 +19,9 @@ module SurrealDB
     #   connection's default session)
     attr_reader :session
 
+    # @return [Connections::Base]
+    attr_reader :connection
+
     # @param connection [Connections::Base]
     # @param id [Uuid]
     # @param session [Uuid, nil]
@@ -85,20 +88,25 @@ module SurrealDB
       @state = :cancelled if open?
     end
 
-    def rpc(method, params = [])
+    def rpc(method, params = [], timeout: nil)
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 
-      request(method, params, txn: @id)
+      request(method, params, txn: @id, **timeout_option(timeout))
     end
 
     # A transaction does not outlive its connection, so once a request
     # through it fails with the connection the transaction is over. One that
     # timed out may still be running on the server, or have committed, so
-    # the transaction cannot safely be used after that either.
+    # the transaction cannot safely be used after that either; one that
+    # timed out before it was sent changed nothing, and the transaction is
+    # still open.
     def request(method, params, **)
       @connection.send_request(method, params, session: @session, **)
-    rescue ConnectionError, TimeoutError
+    rescue ConnectionError
       @state = :lost
+      raise
+    rescue TimeoutError => e
+      @state = :lost if e.sent?
       raise
     end
   end
