@@ -11,4 +11,13 @@ RSpec.describe SurrealDB::Connections::SessionState do
     expect(state.variables['v']).to eq({ 'tags' => ['a'], 'name' => 'x' })
     expect(state.copy.variables['v']).to eq({ 'tags' => ['a'], 'name' => 'x' })
   end
+
+  it 'keeps a Set variable as it was set, too' do
+    value = Set[['a'], ['b']]
+    state = described_class.new
+    state.track('set', ['v', value], nil)
+    value << ['c']
+    value.first << 'x'
+    expect(state.variables['v'].to_a).to eq([['a'], ['b']])
+  end
 end
