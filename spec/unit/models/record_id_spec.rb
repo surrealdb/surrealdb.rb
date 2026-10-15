@@ -59,6 +59,27 @@ RSpec.describe SurrealDB::RecordID do
       end
     end
 
+    it 'round-trips tables and ids that contain escaped characters' do
+      [
+        ["a\u27E9b", 'x'], ['t', "x\u27E9y"], ['t', 'a\\b'], ['t', "two\nlines"], ["a\\\u27E9", "\u27E9"]
+      ].each do |table, id|
+        rid = described_class.new(table, id)
+        expect(described_class.parse(rid.to_s)).to eq(rid)
+      end
+    end
+
+    it 'undoes escapes the way SurrealQL writes them' do
+      expect(described_class.parse("t:\u27E8a\\\u27E9b\u27E9").id).to eq("a\u27E9b")
+      expect(described_class.parse('`a\\`b`:x').table).to eq('a`b')
+      expect(described_class.parse("t:\u27E8\\u{41}\\t\u27E9").id).to eq("A\t")
+    end
+
+    it 'rejects unterminated or trailing escaped ids' do
+      expect { described_class.parse("t:\u27E8abc") }.to raise_error(ArgumentError)
+      expect { described_class.parse("t:\u27E8a\u27E9b") }.to raise_error(ArgumentError)
+      expect { described_class.parse("\u27E8t\\\u27E9:x") }.to raise_error(ArgumentError)
+    end
+
     it 'rejects strings without colon' do
       expect { described_class.parse('invalid') }.to raise_error(ArgumentError)
     end
