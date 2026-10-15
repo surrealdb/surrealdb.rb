@@ -138,25 +138,48 @@ RSpec.shared_examples 'query operations' do
 
   after { client.close }
 
-  it 'executes a raw query' do
-    client.create(table, { 'name' => 'Alice', 'age' => 30 })
+  it 'executes a raw query, returning one result per statement' do
+    client.create(SurrealDB::RecordID.new(table, 'alice'), { 'name' => 'Alice', 'age' => 30 })
     results = client.query("SELECT * FROM #{table}")
-    expect(results).to be_a(Array)
+    expect(results).to eq([[{ 'id' => SurrealDB::RecordID.new(table, 'alice'), 'name' => 'Alice', 'age' => 30 }]])
   end
 
   it 'executes a parameterized query' do
     client.create(table, { 'name' => 'Alice', 'age' => 30 })
     client.create(table, { 'name' => 'Bob', 'age' => 25 })
-    results = client.query('SELECT * FROM type::table($table) WHERE age > $min_age', {
+    results = client.query('SELECT name FROM type::table($table) WHERE age > $min_age', {
                              'table' => table,
                              'min_age' => 28
                            })
-    expect(results).to be_a(Array)
+    expect(results).to eq([[{ 'name' => 'Alice' }]])
   end
 
   it 'handles multi-statement queries' do
-    results = client.query("CREATE #{table}:a SET name = 'Alice'; CREATE #{table}:b SET name = 'Bob';")
-    expect(results).to be_a(Array)
+    results = client.query("CREATE #{table}:a SET name = 'Alice'; CREATE #{table}:b SET name = 'Bob'; RETURN 3;")
+    expect(results.length).to eq(3)
+    expect(results[0].map { |r| r['id'] }).to eq([SurrealDB::RecordID.new(table, 'a')])
+    expect(results[1].map { |r| r['name'] }).to eq(['Bob'])
+    expect(results[2]).to eq(3)
+  end
+
+  it 'raises the error of a failed statement, as the class for its kind' do
+    expect { client.query("RETURN 1; THROW 'boom'; RETURN 2") }
+      .to raise_error(SurrealDB::ThrownError, /boom/) { |e| expect(e.kind).to eq('Thrown') }
+    # the first failure wins
+    expect { client.query("RETURN 1; SELECT * FROM #{table}:x; THROW 'second'") }
+      .to raise_error(SurrealDB::NotFoundError, /#{table}/)
+  end
+
+  it 'raises a parse error as ValidationError' do
+    expect { client.query('INVALID SYNTAX') }.to raise_error(SurrealDB::ValidationError, /Parse error/)
+  end
+
+  it 'reports every statement, failed or not, through query_raw' do
+    results = client.query_raw("RETURN 1; THROW 'boom'; RETURN 2")
+    expect(results.map(&:status)).to eq(%w[OK ERR OK])
+    expect(results.map(&:result)).to eq([1, nil, 2])
+    expect(results[1].error).to match(/boom/)
+    expect(results[1].time).to be_a(String)
   end
 end
 
@@ -164,16 +187,22 @@ RSpec.shared_examples 'auth operations' do
   after { client.close }
 
   it 'returns version info' do
-    version = client.version
-    expect(version).to be_a(String)
-    expect(version).to include('surrealdb')
+    expect(client.version).to match(/\Asurrealdb-\d+\.\d+\.\d+/)
   end
 
   it 'can invalidate and re-signin' do
     client.invalidate
+    expect { client.query('INFO FOR DB') }.to raise_error(SurrealDB::NotAllowedError)
+
     client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
     client.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
-    expect(client.version).to be_a(String)
+    expect(client.query('INFO FOR DB')[0]).to include('tables')
+  end
+
+  it 'reports wrong credentials as NotAllowedError' do
+    client.invalidate
+    expect { client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => 'wrong' }) }
+      .to raise_error(SurrealDB::NotAllowedError)
   end
 end
 

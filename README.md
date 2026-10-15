@@ -64,11 +64,9 @@ client = SurrealDB::Client.new("ws://localhost:8000")
 
 # HTTP (stateless, simpler)
 client = SurrealDB::Client.new("http://localhost:8000")
-
-# Embedded (in-process, no server needed)
-require "surrealdb/embedded"
-client = SurrealDB::Client.new("mem://")
 ```
+
+For in-process use without a server, see [Embedded Database](#embedded-database).
 
 ## Authentication
 
@@ -170,31 +168,34 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   db.signin("user" => "root", "pass" => "root")
   db.use("test", "test")
 
-  # Simple query
-  results = db.query("SELECT * FROM person")
-
-  # Parameterized query
-  results = db.query(
-    "SELECT * FROM person WHERE age > $min_age AND name = $name",
-    { "min_age" => 25, "name" => "Alice" }
-  )
-
-  # Multi-statement query
-  results = db.query(<<~SQL)
+  # Multi-statement query: one result per statement
+  created_alice, created_bob, people = db.query(<<~SQL)
     CREATE person:alice SET name = 'Alice', age = 30;
     CREATE person:bob SET name = 'Bob', age = 25;
     SELECT * FROM person;
   SQL
 
+  # Parameterized query
+  adults, = db.query(
+    "SELECT * FROM person WHERE age > $min_age AND name = $name",
+    { "min_age" => 25, "name" => "Alice" }
+  )
+
   # Connection-scoped variables
-  db.set("current_user", "alice")
-  results = db.query("SELECT * FROM person WHERE name = $current_user")
+  db.set("current_user", "Alice")
+  mine, = db.query("SELECT * FROM person WHERE name = $current_user")
   db.unset("current_user")
 
-  # Run a SurrealDB function
-  result = db.run("fn::my_function", "arg1", "arg2")
+  # Run a function
+  db.run("string::uppercase", "hello") # => "HELLO"
+  db.query("DEFINE FUNCTION OVERWRITE fn::greet($name: string) { RETURN 'Hello, ' + $name }")
+  db.run("fn::greet", "Alice")         # => "Hello, Alice"
 end
 ```
+
+`query` raises when any statement fails, with the error of the first failed
+statement (see [Error Handling](#error-handling)). Statements before it may
+already have run; use `query_raw` to see each statement's outcome.
 
 ## Structured Query Results
 
@@ -361,7 +362,8 @@ SurrealDB.connect("ws://localhost:8000") do |db|
   db.signin("user" => "root", "pass" => "root")
   db.use("test", "test")
 
-  # Start a live query
+  # Start a live query (the table must exist)
+  db.query("DEFINE TABLE IF NOT EXISTS person SCHEMALESS")
   live_id = db.live("person")
 
   # Subscribe to notifications
@@ -413,8 +415,12 @@ SurrealDB::NONE
 
 # Geometry
 point = SurrealDB::GeometryPoint.new(-122.4194, 37.7749)
-line = SurrealDB::GeometryLine.new(point1, point2)
-polygon = SurrealDB::GeometryPolygon.new(exterior_ring)
+line = SurrealDB::GeometryLine.new(point, SurrealDB::GeometryPoint.new(-122.0, 37.5))
+ring = SurrealDB::GeometryLine.new(
+  SurrealDB::GeometryPoint.new(0, 0), SurrealDB::GeometryPoint.new(1, 0),
+  SurrealDB::GeometryPoint.new(1, 1), SurrealDB::GeometryPoint.new(0, 0)
+)
+polygon = SurrealDB::GeometryPolygon.new(ring)
 
 # Range
 range = SurrealDB::Range.new(
@@ -427,9 +433,13 @@ range = SurrealDB::Range.new(
 
 ```ruby
 begin
-  db.query("INVALID SYNTAX")
+  db.query("SELEC * FROM person")
+rescue SurrealDB::ValidationError => e
+  puts "Invalid query: #{e.message}" # parse errors
 rescue SurrealDB::QueryError => e
   puts "Query failed: #{e.message}"
+rescue SurrealDB::ThrownError => e
+  puts "THROW: #{e.message}"
 rescue SurrealDB::NotFoundError => e
   puts "Not found: #{e.message}"
 rescue SurrealDB::NotAllowedError => e
@@ -448,6 +458,8 @@ end
 ## Configuration
 
 ```ruby
+require "logger" # from Ruby 3.5, add `gem "logger"` to your Gemfile
+
 SurrealDB.configure do |config|
   config.timeout = 60  # seconds (default: 30)
   config.logger = Logger.new($stdout)

@@ -97,6 +97,11 @@ jobs:
       - name: Run integration tests (${{ matrix.transport }})
         run: bundle exec rspec spec/integration/${{ matrix.transport }}
 
+      # The README examples use both transports, so they run once per server.
+      - name: Run README examples
+        if: matrix.transport == 'websocket'
+        run: bundle exec rspec spec/integration/readme_spec.rb
+
       - name: Stop SurrealDB
         if: always()
         run: docker rm -f surrealdb || true

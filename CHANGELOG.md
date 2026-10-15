@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- README examples that did not run: the Queries example selected from a table before
+  creating it and called an undefined function, the Live Queries example watched a table
+  that did not exist, the geometry example used undefined variables, and the error handling
+  example expected `QueryError` for a parse error (the server reports `ValidationError`).
+  Every Ruby example in the README now runs in CI against a real server.
+
 - Record-level CRUD targeted the wrong table: `RecordID`s were sent as strings, which the
   server reads as a table name, so `select("person:alice")` read a table called
   `person:alice`. Record ids and tables are now sent as typed CBOR values (tags 8 and 7).
@@ -64,6 +70,10 @@
 
 ### Changed
 
+- **Breaking:** `query` returns one result per statement (`[1, [{...}]]`) instead of the
+  server's raw `{status, time, result}` envelopes, and raises when a statement fails, with
+  the first failed statement's error as the `ServerError` subclass for its kind (previously
+  failed statements were returned silently). `query_raw` still reports every statement.
 - WebSocket connections reconnect by default; pass `reconnect: false` to opt out.
 - **Breaking:** `begin_transaction` returns a `Transaction`; `Client#commit`/`#cancel` take
   the transaction (or its id).
