@@ -99,19 +99,31 @@ module SurrealDB
 
     # --- Query ---
 
-    # Executes a SurrealQL query.
+    # Executes a SurrealQL query and returns each statement's result.
+    #
+    # If any statement fails, raises that statement's error (the first, if
+    # several fail), as the {ServerError} subclass matching its kind. Use
+    # {#query_raw} to see every statement's outcome, including the ones that
+    # succeeded alongside a failure.
+    #
+    # @example
+    #   db.query("RETURN 1; SELECT * FROM person") # => [1, [{...}, ...]]
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
-    # @return [Array] array of result sets (one per statement)
+    # @return [Array] one result per statement
+    # @raise [ServerError] when a statement fails
     def query(sql, vars = {})
-      params = [sql]
-      params << vars unless vars.empty?
-      rpc(Protocol::Methods::QUERY, params)
+      query_raw(sql, vars).map do |statement|
+        raise statement.to_error if statement.error?
+
+        statement.result
+      end
     end
 
     # Executes a SurrealQL query and returns structured per-statement results.
     # Unlike {#query}, this returns {QueryResult} objects with status, timing,
-    # and per-statement error information.
+    # and per-statement error information, and does not raise when a
+    # statement fails.
     # @param sql [String] SurrealQL statement(s)
     # @param vars [Hash] query variables
     # @return [Array<QueryResult>]

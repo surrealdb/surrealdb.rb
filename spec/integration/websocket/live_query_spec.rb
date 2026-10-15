@@ -10,7 +10,7 @@ RSpec.describe 'WebSocket Live Queries', :integration do
     client.query("DEFINE TABLE #{table} SCHEMALESS")
 
     live_id = client.live(table)
-    expect(live_id).not_to be_nil
+    expect(live_id).to be_a(SurrealDB::Uuid)
 
     notifications = Queue.new
     client.subscribe(live_id.to_s) { |n| notifications.push(n) }
@@ -26,9 +26,10 @@ RSpec.describe 'WebSocket Live Queries', :integration do
       sleep 0.3
     end
 
-    expect(notification).not_to be_nil
-    action = notification['action'] || notification[:action]
-    expect(action.to_s.downcase).to eq('create')
+    expect(notification).to include('id' => live_id)
+    expect(notification['action'].to_s.downcase).to eq('create')
+    expect(notification['result']).to include('name' => 'Alice')
+    expect(notification['result']['id'].table).to eq(table)
 
     client.kill(live_id.to_s)
   end
