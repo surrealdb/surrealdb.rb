@@ -216,6 +216,15 @@ RSpec.describe SurrealDB::Client do
       expect { tx.commit }.to raise_error(SurrealDB::TransactionError, /lost/)
     end
 
+    it 'is lost when a commit times out, as it may have taken effect' do
+      allow(connection).to receive(:send_request).with('commit', any_args)
+                                                 .and_raise(SurrealDB::TimeoutError, 'request timed out')
+      tx = client.begin_transaction
+      expect { tx.commit }.to raise_error(SurrealDB::TimeoutError)
+      expect(tx).to be_lost
+      expect { tx.cancel }.to raise_error(SurrealDB::TransactionError, /lost/)
+    end
+
     it 'begins a transaction and runs its requests with the txn id in the envelope' do
       tx = client.begin_transaction
       expect(tx.id).to eq(txn_id)
