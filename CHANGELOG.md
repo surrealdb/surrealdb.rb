@@ -27,6 +27,11 @@
 - `set`/`let`/`unset` were silently lost over HTTP, where each request runs in a fresh
   server session. The client now keeps the variables and sends them with every query.
 
+- WebSocket `connect` could hang forever: the TCP connect and the handshake reads had no
+  deadline. Opening a connection (TCP, TLS and the WebSocket upgrade) now shares one
+  `connect_timeout` (defaults to `timeout`), and connection failures raise `ConnectionError`
+  instead of raw `Errno` exceptions.
+
 ### Added
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)

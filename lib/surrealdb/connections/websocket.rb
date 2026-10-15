@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'socket'
+require 'io/wait'
 require 'openssl'
 require 'uri'
 require 'websocket/driver'
@@ -29,9 +30,14 @@ module SurrealDB
       # @return [Integer] response timeout in seconds
       attr_reader :timeout
 
+      # @return [Numeric] how long opening the connection (TCP connect, TLS
+      #   and the WebSocket handshake together) may take, in seconds
+      attr_reader :connect_timeout
+
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
+        @connect_timeout = options.fetch(:connect_timeout, @timeout)
         @pending = {}
         @live_handlers = {}
         @mutex = Mutex.new
@@ -41,9 +47,13 @@ module SurrealDB
         @reader_thread = nil
       end
 
+      # Opens the connection. The TCP connect, the TLS handshake and the
+      # WebSocket handshake share one deadline of `connect_timeout` seconds.
+      # @raise [ConnectionError] if the server cannot be reached in time
       def connect
         uri = URI.parse(@url)
-        @socket = open_socket(uri)
+        deadline = monotonic_now + @connect_timeout
+        @socket = open_socket(uri, deadline)
         ws_url = build_ws_url(uri)
 
         @driver = ::WebSocket::Driver.client(SocketWrapper.new(@socket, ws_url), protocols: ['cbor'])
@@ -51,7 +61,13 @@ module SurrealDB
 
         @driver.start
 
-        wait_for_open
+        begin
+          wait_for_open(deadline)
+        rescue StandardError
+          @socket&.close
+          @socket = nil
+          raise
+        end
 
         @connected = true
         start_reader
@@ -108,17 +124,52 @@ module SurrealDB
 
       private
 
-      def open_socket(uri)
-        tcp = TCPSocket.new(uri.host, uri.port || default_port(uri.scheme))
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def remaining(deadline, what)
+        left = deadline - monotonic_now
+        raise ConnectionError, "#{what} timed out after #{@connect_timeout}s" if left <= 0
+
+        left
+      end
+
+      def open_socket(uri, deadline)
+        port = uri.port || default_port(uri.scheme)
+        tcp = begin
+          Socket.tcp(uri.host, port, connect_timeout: remaining(deadline, 'TCP connect'))
+        rescue Errno::ETIMEDOUT, IO::TimeoutError
+          raise ConnectionError, "TCP connect to #{uri.host}:#{port} timed out after #{@connect_timeout}s"
+        rescue SystemCallError, SocketError => e
+          raise ConnectionError, "cannot connect to #{uri.host}:#{port}: #{e.message}"
+        end
         return tcp unless uri.scheme == 'wss'
 
+        tls_connect(tcp, uri.host, deadline)
+      end
+
+      def tls_connect(tcp, host, deadline)
         ctx = OpenSSL::SSL::SSLContext.new
         ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
         ctx.cert_store = OpenSSL::X509::Store.new.tap(&:set_default_paths)
         ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-        ssl.hostname = uri.host
-        ssl.connect
-        ssl
+        ssl.hostname = host
+        ssl.sync_close = true
+        loop do
+          ssl.connect_nonblock
+          return ssl
+        rescue IO::WaitReadable
+          tcp.wait_readable(remaining(deadline, 'TLS handshake'))
+        rescue IO::WaitWritable
+          tcp.wait_writable(remaining(deadline, 'TLS handshake'))
+        end
+      rescue OpenSSL::SSL::SSLError, SystemCallError => e
+        tcp.close
+        raise ConnectionError, "TLS handshake with #{host} failed: #{e.message}"
+      rescue ConnectionError
+        tcp.close
+        raise
       end
 
       def default_port(scheme)
@@ -159,13 +210,9 @@ module SurrealDB
         end
       end
 
-      def wait_for_open
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
-
+      def wait_for_open(deadline)
         loop do
-          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          raise ConnectionError, 'WebSocket handshake timed out' if remaining <= 0
-
+          await_handshake_data(deadline)
           data = read_socket
           raise ConnectionError, 'connection closed during handshake' if data.nil? || data.empty?
 
@@ -178,6 +225,17 @@ module SurrealDB
             end
           end
         end
+      end
+
+      # Waits for data with the time left, rather than blocking in read: a
+      # server that accepts the TCP connection but never answers the upgrade
+      # would otherwise hang connect forever.
+      def await_handshake_data(deadline)
+        left = remaining(deadline, 'WebSocket handshake')
+        return if @socket.respond_to?(:pending) && @socket.pending.positive?
+        return if @socket.to_io.wait_readable(left)
+
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
       end
 
       def start_reader
