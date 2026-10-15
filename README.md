@@ -433,8 +433,8 @@ SurrealDB.configure do |config|
   config.logger = Logger.new($stdout)
 end
 
-# Per-connection timeout
-client = SurrealDB::Client.new("ws://localhost:8000", timeout: 10)
+# Per-connection timeouts: requests, and opening the connection (TCP + TLS + handshake)
+client = SurrealDB::Client.new("ws://localhost:8000", timeout: 10, connect_timeout: 5)
 ```
 
 ## Contributing

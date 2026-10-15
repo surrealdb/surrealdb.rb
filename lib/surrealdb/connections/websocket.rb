@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'socket'
+require 'io/wait'
 require 'openssl'
 require 'uri'
 require 'websocket/driver'
@@ -29,9 +30,14 @@ module SurrealDB
       # @return [Integer] response timeout in seconds
       attr_reader :timeout
 
+      # @return [Numeric] how long opening the connection (TCP connect, TLS
+      #   and the WebSocket handshake together) may take, in seconds
+      attr_reader :connect_timeout
+
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
+        @connect_timeout = options.fetch(:connect_timeout, @timeout)
         @pending = {}
         @live_handlers = {}
         @mutex = Mutex.new
@@ -41,17 +47,27 @@ module SurrealDB
         @reader_thread = nil
       end
 
+      # Opens the connection. The TCP connect, the TLS handshake and the
+      # WebSocket handshake share one deadline of `connect_timeout` seconds.
+      # @raise [ConnectionError] if the server cannot be reached in time
       def connect
         uri = URI.parse(@url)
-        @socket = open_socket(uri)
+        deadline = monotonic_now + @connect_timeout
+        @socket = open_socket(uri, deadline)
         ws_url = build_ws_url(uri)
 
-        @driver = ::WebSocket::Driver.client(SocketWrapper.new(@socket, ws_url), protocols: ['cbor'])
+        @wrapper = SocketWrapper.new(@socket, ws_url)
+        @driver = ::WebSocket::Driver.client(@wrapper, protocols: ['cbor'])
         setup_driver_handlers
 
-        @driver.start
-
-        wait_for_open
+        begin
+          send_upgrade(deadline)
+          wait_for_open(deadline)
+        rescue StandardError
+          @socket&.close
+          @socket = nil
+          raise
+        end
 
         @connected = true
         start_reader
@@ -108,17 +124,84 @@ module SurrealDB
 
       private
 
-      def open_socket(uri)
-        tcp = TCPSocket.new(uri.host, uri.port || default_port(uri.scheme))
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def remaining(deadline, what)
+        left = deadline - monotonic_now
+        raise ConnectionError, "#{what} timed out after #{@connect_timeout}s" if left <= 0
+
+        left
+      end
+
+      def open_socket(uri, deadline)
+        port = uri.port || default_port(uri.scheme)
+        tcp = tcp_connect(uri.host, port, deadline)
         return tcp unless uri.scheme == 'wss'
 
+        tls_connect(tcp, uri.host, deadline)
+      end
+
+      # Resolves the host, then tries its addresses in turn, all within the
+      # one deadline. (Socket.tcp gives each address its own connect_timeout
+      # and does not bound the lookup on every platform.)
+      # An address can also time out on its own (the OS gives up on it)
+      # before the deadline; the next one gets the time left.
+      def tcp_connect(host, port, deadline)
+        error = nil
+        resolve(host, port, deadline).each do |addr|
+          left = deadline - monotonic_now
+          break if left <= 0
+
+          return addr.connect(timeout: left)
+        rescue SystemCallError, IO::TimeoutError => e
+          error = e
+        end
+        raise tcp_connect_error(host, port, error, monotonic_now >= deadline)
+      end
+
+      def tcp_connect_error(host, port, error, out_of_time)
+        if out_of_time || error.is_a?(Errno::ETIMEDOUT) || error.is_a?(IO::TimeoutError)
+          ConnectionError.new("TCP connect to #{host}:#{port} timed out after #{@connect_timeout}s")
+        else
+          ConnectionError.new("cannot connect to #{host}:#{port}: #{error&.message || 'no addresses'}")
+        end
+      end
+
+      # getaddrinfo cannot be interrupted, so the lookup runs in a thread
+      # that is left to finish on its own if the deadline passes first.
+      def resolve(host, port, deadline)
+        lookup = Thread.new { Addrinfo.getaddrinfo(host, port, nil, :STREAM) }
+        lookup.report_on_exception = false
+        return lookup.value if lookup.join(remaining(deadline, 'DNS lookup'))
+
+        raise ConnectionError, "DNS lookup of #{host} timed out after #{@connect_timeout}s"
+      rescue SocketError => e
+        raise ConnectionError, "cannot connect to #{host}:#{port}: #{e.message}"
+      end
+
+      def tls_connect(tcp, host, deadline)
         ctx = OpenSSL::SSL::SSLContext.new
         ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
         ctx.cert_store = OpenSSL::X509::Store.new.tap(&:set_default_paths)
         ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-        ssl.hostname = uri.host
-        ssl.connect
-        ssl
+        ssl.hostname = host
+        ssl.sync_close = true
+        loop do
+          ssl.connect_nonblock
+          return ssl
+        rescue IO::WaitReadable
+          tcp.wait_readable(remaining(deadline, 'TLS handshake'))
+        rescue IO::WaitWritable
+          tcp.wait_writable(remaining(deadline, 'TLS handshake'))
+        end
+      rescue OpenSSL::SSL::SSLError, SystemCallError => e
+        tcp.close
+        raise ConnectionError, "TLS handshake with #{host} failed: #{e.message}"
+      rescue ConnectionError
+        tcp.close
+        raise
       end
 
       def default_port(scheme)
@@ -159,14 +242,22 @@ module SurrealDB
         end
       end
 
-      def wait_for_open
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+      # The upgrade request is written within the connect deadline too: a
+      # peer that does not read would otherwise block the write.
+      def send_upgrade(deadline)
+        @wrapper.deadline = deadline
+        @driver.start
+      rescue SocketWrapper::WriteTimeout
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
+      rescue SystemCallError, IOError, OpenSSL::SSL::SSLError => e
+        raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
+      ensure
+        @wrapper.deadline = nil
+      end
 
+      def wait_for_open(deadline)
         loop do
-          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          raise ConnectionError, 'WebSocket handshake timed out' if remaining <= 0
-
-          data = read_socket
+          data = read_handshake(deadline)
           raise ConnectionError, 'connection closed during handshake' if data.nil? || data.empty?
 
           @driver.parse(data)
@@ -178,6 +269,34 @@ module SurrealDB
             end
           end
         end
+      end
+
+      # Reads handshake data with the time left, never blocking in a read: a
+      # server that accepts the connection but never answers the upgrade
+      # would otherwise hang connect forever. Over TLS the TCP socket can be
+      # readable with only part of a TLS record, on which a blocking read
+      # would wait for the rest, so the SSL socket is read without blocking.
+      # The deadline is checked before every read too, as a server that keeps
+      # sending part of an answer never makes a read wait.
+      def read_handshake(deadline)
+        loop do
+          remaining(deadline, 'WebSocket handshake')
+          return @socket.read_nonblock(16_384)
+        rescue IO::WaitReadable
+          wait_for_handshake(:wait_readable, deadline)
+        rescue IO::WaitWritable
+          wait_for_handshake(:wait_writable, deadline)
+        rescue EOFError
+          return nil
+        rescue SystemCallError, OpenSSL::SSL::SSLError => e
+          raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
+        end
+      end
+
+      def wait_for_handshake(direction, deadline)
+        return if @socket.to_io.public_send(direction, remaining(deadline, 'WebSocket handshake'))
+
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
       end
 
       def start_reader
@@ -286,21 +405,6 @@ module SurrealDB
 
         response = @rpc.decode_response(result)
         Protocol::Response.extract_result(response)
-      end
-
-      # Minimal wrapper that gives websocket-driver the interface it expects:
-      # #url for the request URL, and #write for sending bytes.
-      class SocketWrapper
-        attr_reader :url
-
-        def initialize(socket, url)
-          @socket = socket
-          @url = url
-        end
-
-        def write(data)
-          @socket.write(data)
-        end
       end
     end
   end
