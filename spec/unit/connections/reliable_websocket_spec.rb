@@ -114,6 +114,26 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
                            ['select', ['person'], session]
                          ])
     end
+
+    it 'signs them in again with the credentials they signed in with, not their token, which may have expired' do
+      dropped = false
+      allow(inner).to receive_messages(connect: nil, close: nil)
+      allow(inner).to receive(:execute) do |method, params, session: nil, **|
+        sent << [method, params, session]
+        if method == 'select' && !dropped
+          dropped = true
+          raise SurrealDB::ConnectionError, 'disconnected'
+        end
+        'token' if method == 'signin'
+      end
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('signin', [{ 'user' => 'u', 'pass' => 'p' }], session: session)
+      sent.clear
+
+      reliable.send_request('select', ['person'], session: session)
+      expect(sent).to include(['signin', [{ 'user' => 'u', 'pass' => 'p' }], session])
+      expect(sent.map(&:first)).not_to include('authenticate')
+    end
   end
 
   describe '#on_notification' do

@@ -81,6 +81,17 @@ RSpec.describe SurrealDB::Connections::WebSocket do
       expect(elapsed).to be < 0.6
     end
 
+    it 'moves on to the next address when one times out early, while time is left' do
+      timed_out = instance_double(Addrinfo)
+      allow(timed_out).to receive(:connect).and_raise(Errno::ETIMEDOUT)
+      second = instance_double(Addrinfo)
+      allow(second).to receive(:connect).and_raise(Errno::ECONNREFUSED)
+      allow(Addrinfo).to receive(:getaddrinfo).and_return([timed_out, second])
+      error, = connect_within(5, described_class.new('ws://db.example.com:8000', connect_timeout: 1))
+      expect(error.message).to start_with('cannot connect to db.example.com:8000')
+      expect(second).to have_received(:connect)
+    end
+
     it 'moves on to the next address when one refuses' do
       refused = instance_double(Addrinfo)
       allow(refused).to receive(:connect).and_raise(Errno::ECONNREFUSED)
