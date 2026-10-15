@@ -87,12 +87,15 @@ module SurrealDB
 
       # Sends a request to one of the server's HTTP routes (/import, /export)
       # with a session's namespace, database and credentials. Like RPC
-      # requests, it is refused once the connection has been closed.
+      # requests, it is refused once the connection, or the session, has been
+      # closed.
       # @param session [Uuid, nil]
       # @return [Net::HTTPResponse]
       # @raise [ConnectionError] if the connection is not open
+      # @raise [SessionError] if the session has been detached
       def http_request(verb, path, session: nil, **, &)
         raise ConnectionError, 'not connected' unless @connected
+        raise SessionError, "session #{session} is closed" if session && session_state(session).nil?
 
         http_endpoint.request(verb, path, state: session_state(session), **, &)
       end

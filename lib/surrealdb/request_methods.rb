@@ -271,7 +271,7 @@ module SurrealDB
       ok = response.is_a?(Net::HTTPSuccess)
       return Connections::HTTPEndpoint.raise_for(response, 'import') unless ok || response.code == '422'
 
-      failures = import_failures(response.body.to_s)
+      failures = import_failures(response.body.to_s, ok)
       if failures.any?
         errors = failures.first(KEPT_IMPORT_FAILURES).map { |f| QueryResult.from_response(f).to_error }
         raise ImportError.new(errors, failures.length)
@@ -279,9 +279,13 @@ module SurrealDB
       Connections::HTTPEndpoint.raise_for(response, 'import') unless ok
     end
 
-    def import_failures(body)
+    # An unreadable answer to a successful import cannot show that every
+    # statement succeeded, so it is an error rather than an empty list.
+    def import_failures(body, succeeded)
       Array(CBOR::Decoder.decode(body)).select { |r| r.is_a?(Hash) && r['status'] == 'ERR' }
-    rescue StandardError
+    rescue StandardError => e
+      raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+
       []
     end
 

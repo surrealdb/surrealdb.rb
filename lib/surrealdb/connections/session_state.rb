@@ -90,10 +90,11 @@ module SurrealDB
 
       # The value as it was sent: later changes to the caller's object must
       # not change what a fork or a replay sends.
-      def snapshot(value)
+      def snapshot(value) # rubocop:disable Metrics/CyclomaticComplexity
         case value
         when Hash then value.to_h { |k, v| [snapshot(k), snapshot(v)] }
         when Array then value.map { |v| snapshot(v) }
+        when Set then Set.new(value) { |v| snapshot(v) }
         when String then value.frozen? ? value : value.dup
         else value
         end
