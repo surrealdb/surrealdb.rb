@@ -85,13 +85,9 @@ module SurrealDB
         @inner.connected? && !@restoring
       end
 
-      def supports_live_queries?
-        true
-      end
+      def supports_live_queries? = true
 
-      def supports_transactions?
-        true
-      end
+      def supports_transactions? = true
 
       def http_endpoint
         @inner.http_endpoint
@@ -262,8 +258,7 @@ module SurrealDB
       # reachable, and would be restored into a session that no longer exists.
       def forget_lives(session)
         gone = @state_mutex.synchronize do
-          keys = @lives.select { |_, live| live[:session] == session }.keys
-          keys.map { |key| @lives.delete(key) }
+          @lives.select { |_, live| live[:session] == session }.keys.map { |key| @lives.delete(key) }
         end
         gone.each { |live| @inner.remove_notification_handler(live[:current].to_s) }
       end
@@ -428,13 +423,18 @@ module SurrealDB
         @inner.send_request(Protocol::Methods::INVALIDATE, [], session: id)
       end
 
+      # The handler is read once the fresh id is in place: one registered
+      # meanwhile went under the old id, whose handler is dropped.
       def restore_live_queries
         lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
         lives.each do |key, live|
-          @inner.remove_notification_handler(live[:current].to_s)
           fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          @state_mutex.synchronize { @lives[key][:current] = fresh if @lives.key?(key) }
-          @inner.on_notification(fresh.to_s, relabel(key, live[:handler])) if live[:handler]
+          handler = @state_mutex.synchronize do
+            @lives[key][:current] = fresh if @lives.key?(key)
+            @lives.dig(key, :handler)
+          end
+          @inner.remove_notification_handler(live[:current].to_s)
+          @inner.on_notification(fresh.to_s, relabel(key, handler)) if handler
         rescue ServerError => e
           log(:error, "Could not restore live query #{key}: #{e.message}")
         end

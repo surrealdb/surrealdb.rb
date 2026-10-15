@@ -346,6 +346,25 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe 'a handler registered while a reconnect restores its live query' do
+    it 'receives the notifications of the restored query' do
+      original = reliable.send_request('live', ['person'])
+      received = []
+      allow(inner).to receive(:execute).and_wrap_original do |execute, method, *args, **options|
+        result = execute.call(method, *args, **options)
+        reliable.on_notification(original.to_s, ->(n) { received << n }) if method == 'live' && received.empty?
+        result
+      end
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+
+      new_id = SurrealDB::Uuid.parse('00000000-0000-4000-8000-000000000002')
+      inner.handlers[new_id.to_s].call({ 'id' => new_id, 'action' => 'CREATE' })
+      expect(received).to eq([{ 'id' => original, 'action' => 'CREATE' }])
+      expect(inner.handlers.keys).to eq([new_id.to_s])
+    end
+  end
+
   describe '#connect after #close' do
     it 'restores the sessions and live queries the client still holds' do
       session = SurrealDB::Uuid.v4

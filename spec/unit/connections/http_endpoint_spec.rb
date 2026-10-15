@@ -19,7 +19,8 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
   end
 
   it 'opens HTTPS endpoints with TLS on port 443' do
-    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil)
+    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :write_timeout= => nil,
+                                      :read_timeout= => nil)
     allow(Net::HTTP).to receive(:new).and_return(http)
     allow(http).to receive(:start).and_raise(Errno::ECONNREFUSED)
     endpoint = described_class.new('wss://db.example.com/rpc', timeout: 1)
@@ -43,6 +44,19 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
   ensure
     server&.close
     reader&.kill
+  end
+
+  it 'times out writing a body the server does not read' do
+    server = TCPServer.new('127.0.0.1', 0)
+    accepted = Thread.new { server.accept }
+    endpoint = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 0.3)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    expect { endpoint.request(:post, '/import', body: 'x' * 64_000_000) }
+      .to raise_error(SurrealDB::TimeoutError, %r{/import timed out})
+    expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 3
+  ensure
+    server&.close
+    accepted&.value&.close
   end
 
   describe '.raise_for' do

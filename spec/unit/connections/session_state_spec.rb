@@ -62,6 +62,21 @@ RSpec.describe SurrealDB::Connections::SessionState do
     expect([state.namespace, state.database]).to eq(%w[app prod])
   end
 
+  it 'keeps what the SDK types in a variable hold as it was set' do
+    id = ['a', { 'k' => +'v' }]
+    record = SurrealDB::RecordID.new('t', id)
+    range = SurrealDB::Range.new(SurrealDB::BoundIncluded.new(['x']), SurrealDB::BoundExcluded.new(['y']))
+    state = described_class.new
+    state.track('set', ['v', [record, range]], nil)
+    id << 'b'
+    id[1]['k'] << 'w'
+    range.begin_bound.value << 'z'
+    expect(state.variables['v']).to eq([SurrealDB::RecordID.new('t', ['a', { 'k' => 'v' }]),
+                                        SurrealDB::Range.new(SurrealDB::BoundIncluded.new(['x']),
+                                                             SurrealDB::BoundExcluded.new(['y']))])
+    expect(state.copy.variables['v'][0].id).to eq(['a', { 'k' => 'v' }])
+  end
+
   it 'keeps the tokens and the namespace and database as they were, not the caller strings' do
     token = +'token'
     namespace = +'app'
