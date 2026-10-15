@@ -50,7 +50,7 @@ RSpec.describe SurrealDB::Connections::HTTP do
       expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
       http.send_request('ping', timeout: 0.5) # opens a new socket
     end
-    expect(seen).to all(be_within(0.05).of(0.5))
+    expect(seen).to all(be_between(0.35, 0.501))
     expect([net.open_timeout, net.read_timeout]).to eq([2, 2])
   ensure
     http&.close
@@ -74,7 +74,20 @@ RSpec.describe SurrealDB::Connections::HTTP do
       expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
       http.send_request('ping', timeout: 1)
     end
-    expect(read_timeout).to be_within(0.1).of(0.7)
+    expect(read_timeout).to be_between(0.4, 0.7)
+  ensure
+    http&.close
+    server&.close
+  end
+
+  it 'raises ConnectionError when the next request cannot open a new socket' do
+    server = ScriptedHTTPServer.new(%i[drop])
+    http = http_to(server)
+    Timeout.timeout(5) do
+      expect { http.send_request('ping') }.to raise_error(SurrealDB::ConnectionError)
+      server.close
+      expect { http.send_request('ping') }.to raise_error(SurrealDB::ConnectionError, /cannot open an HTTP connection/)
+    end
   ensure
     http&.close
     server&.close

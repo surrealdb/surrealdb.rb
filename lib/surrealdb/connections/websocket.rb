@@ -68,7 +68,8 @@ module SurrealDB
         @socket = open_socket(uri, deadline)
         ws_url = build_ws_url(uri)
 
-        @driver = ::WebSocket::Driver.client(SocketWrapper.new(@socket, ws_url), protocols: ['cbor'])
+        @wrapper = SocketWrapper.new(@socket, ws_url)
+        @driver = ::WebSocket::Driver.client(@wrapper, protocols: ['cbor'])
         setup_driver_handlers
 
         @driver.start
@@ -128,9 +129,11 @@ module SurrealDB
 
         @mutex.synchronize { @pending[id] = entry }
 
+        timeout ||= @timeout
+        deadline = monotonic_now + timeout
         begin
-          write_frame(encoded)
-          wait_for_response(entry, timeout || @timeout)
+          write_frame(encoded, deadline, method)
+          wait_for_response(entry, deadline, timeout)
         ensure
           @mutex.synchronize { @pending.delete(id) }
         end
@@ -192,8 +195,11 @@ module SurrealDB
       # would otherwise hang connect forever. Over TLS the TCP socket can be
       # readable with only part of a TLS record, on which a blocking read
       # would wait for the rest, so the SSL socket is read without blocking.
+      # The deadline is checked before every read too, as a server that keeps
+      # sending part of an answer never makes a read wait.
       def read_handshake(deadline)
         loop do
+          remaining(deadline, 'WebSocket handshake')
           return @socket.read_nonblock(16_384)
         rescue IO::WaitReadable
           wait_for_handshake(:wait_readable, deadline)
@@ -334,9 +340,10 @@ module SurrealDB
 
       # Waits for the reader thread to deliver a response into the entry,
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
-      def wait_for_response(entry, timeout)
+      # Waits for the response until the request's deadline, which writing
+      # the request has already used part of.
+      def wait_for_response(entry, deadline, timeout)
         result = @mutex.synchronize do
-          deadline = monotonic_now + timeout
           while entry[:result].nil?
             remaining = deadline - monotonic_now
             raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
@@ -354,26 +361,23 @@ module SurrealDB
 
       # A frame the socket refused was not sent, so the request is safe to
       # send again: report it as NotConnectedError, not as an interruption.
-      def write_frame(encoded)
-        @write_mutex.synchronize { @driver.binary(encoded) }
+      # Writing counts against the request's deadline. A frame that could
+      # not be written in time was not received whole, so the server did
+      # not run it; but part of it may have gone out, which leaves the
+      # connection unusable.
+      def write_frame(encoded, deadline, method)
+        @write_mutex.synchronize do
+          @wrapper.deadline = deadline
+          @driver.binary(encoded)
+        ensure
+          @wrapper.deadline = nil
+        end
+      rescue SocketWrapper::WriteTimeout
+        connection_lost('write timed out')
+        raise TimeoutError.new("'#{method}' timed out while it was being sent", sent: false)
       rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
         connection_lost("write failed: #{e.class}: #{e.message}")
         raise NotConnectedError, "not connected (#{e.message})"
-      end
-
-      # Minimal wrapper that gives websocket-driver the interface it expects:
-      # #url for the request URL, and #write for sending bytes.
-      class SocketWrapper
-        attr_reader :url
-
-        def initialize(socket, url)
-          @socket = socket
-          @url = url
-        end
-
-        def write(data)
-          @socket.write(data)
-        end
       end
     end
   end

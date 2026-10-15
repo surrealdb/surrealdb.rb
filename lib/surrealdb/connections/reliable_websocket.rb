@@ -55,14 +55,34 @@ module SurrealDB
         # Sessions whose credentials could not be restored, by the generation
         # that lost them.
         @auth_lost = {}
+        @on_reconnect = nil
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
+      # Connecting again after {#close} restores what the client still holds
+      # (sessions, live queries), as a reconnect does: the new connection
+      # has none of it.
       def connect
-        @closed = false
-        @inner.connect
-        @opened = true
-        @connected = true
+        @reconnect_mutex.synchronize do
+          @closed = false
+          @inner.connect
+          reopened = @opened
+          @opened = true
+          @connected = true
+          if reopened
+            check_new_connection
+            restore_state
+          end
+        end
+      end
+
+      # Registers a check run on each new connection before anything is
+      # restored on it, such as the client's server version check. When it
+      # raises, the connection is closed again and the error reaches the
+      # request that was waiting for the reconnect.
+      # @yield [WebSocket] the new connection, to send the check on
+      def on_reconnect(&block)
+        @on_reconnect = block
       end
 
       def close
@@ -195,7 +215,7 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        return kill_lost(params[0], deadline) if method == Protocol::Methods::KILL
+        return ended_with_connection(method, params, session, deadline) if ends_with_connection?(method, session)
 
         interrupted!(method, e, deadline) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
         recover(deadline, method)
@@ -261,18 +281,33 @@ module SurrealDB
         end
       end
 
+      # Live queries and attached sessions end with the connection, so a
+      # kill or detach the connection dropped under has done its job.
+      def ends_with_connection?(method, session)
+        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
+      end
+
+      def ended_with_connection(method, params, session, deadline)
+        method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
+        recover(deadline, method)
+        nil
+      rescue TimeoutError
+        nil # the reconnect carries on in the background
+      end
+
       # A live query ends with the connection it was started on, so a kill
       # the connection dropped under has done its job either way, as long as
       # the reconnect does not start the live query again.
-      def kill_lost(id, deadline)
+      def kill_lost(id)
         live = @state_mutex.synchronize { @lives.delete(id.to_s) }
         @inner.remove_notification_handler(live[:current].to_s) if live
-        begin
-          recover(deadline, Protocol::Methods::KILL)
-        rescue TimeoutError
-          nil # the reconnect carries on in the background
-        end
-        nil
+      end
+
+      # The same goes for a detach: the session ended with the connection, so
+      # forget it and its live queries rather than restoring them.
+      def detach_lost(session)
+        @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
+        forget_lives(session)
       end
 
       # The server ended the session's live queries (reset, detach); drop them and
@@ -333,7 +368,7 @@ module SurrealDB
 
         log(:warn, "WebSocket connection lost (#{reason}); reconnecting")
         ensure_connected!
-      rescue ConnectionError => e
+      rescue Error => e
         log(@closed ? :debug : :error, "Reconnection failed: #{e.message}")
       end
 
@@ -347,9 +382,8 @@ module SurrealDB
           @restoring = true
           begin
             reconnect!
-            @generation += 1
-            restore_sessions
-            restore_live_queries
+            check_new_connection
+            restore_state
           ensure
             @restoring = false
           end
@@ -375,7 +409,7 @@ module SurrealDB
         left = deadline - monotonic_now
         return if worker.join(left.clamp(0, nil))
 
-        raise TimeoutError, "'#{request}' timed out waiting for the connection to come back"
+        raise TimeoutError.new("'#{request}' timed out waiting for the connection to come back", sent: false)
       end
 
       # @raise [ConnectionError] if all attempts fail
