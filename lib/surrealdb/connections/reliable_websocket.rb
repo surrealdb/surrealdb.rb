@@ -164,6 +164,8 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
+        return kill_lost(params[0]) if method == Protocol::Methods::KILL
+
         ensure_connected!
         raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
 
@@ -220,6 +222,16 @@ module SurrealDB
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
+      end
+
+      # A live query ends with the connection it was started on, so a kill
+      # the connection dropped under has done its job either way, as long as
+      # the reconnect does not start the live query again.
+      def kill_lost(id)
+        live = @state_mutex.synchronize { @lives.delete(id.to_s) }
+        @inner.remove_notification_handler(live[:current].to_s) if live
+        ensure_connected!
+        nil
       end
 
       # The server ended the session's live queries (reset, detach); drop them and
@@ -339,7 +351,11 @@ module SurrealDB
 
       # One session failing to restore does not stop the others.
       def restore_sessions
-        restore_session(nil, @inner.session_state(nil))
+        begin
+          restore_session(nil, @inner.session_state(nil))
+        rescue ServerError => e
+          log(:error, "Could not restore the default session: #{e.message}")
+        end
         @inner.attached_sessions.each do |id, state|
           @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
           restore_session(id, state)
