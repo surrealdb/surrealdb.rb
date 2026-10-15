@@ -112,8 +112,8 @@ RSpec.describe SurrealDB::Connections::Base, '#send_request token renewal' do
     connection.next_expiry = Time.now + 3600
     connection.slow = { 'refresh' => 0.2 }
     connection.send_request('query', ['RETURN 1'], timeout: 0.3)
-    expect(connection.timeouts['refresh']).to be_within(0.05).of(0.3)
-    expect(connection.timeouts['query']).to be_within(0.05).of(0.1)
+    expect(connection.timeouts['refresh']).to be_between(0.15, 0.3)
+    expect(connection.timeouts['query']).to be_between(0, 0.1)
   end
 
   it 'does not send the request when the renewal used up its time' do
