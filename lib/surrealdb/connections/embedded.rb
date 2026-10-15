@@ -59,6 +59,12 @@ module SurrealDB
       end
 
       # An embedded database has no HTTP routes.
+      # An embedded engine is healthy while it is open.
+      # @return [void]
+      def health
+        raise ConnectionError, 'not connected' unless @connected
+      end
+
       def http_endpoint
         raise UnsupportedError, 'import, export and health are not available on embedded connections'
       end

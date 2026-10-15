@@ -11,6 +11,7 @@ module SurrealDB
       SIGNUP          = 'signup'
       AUTHENTICATE    = 'authenticate'
       INVALIDATE      = 'invalidate'
+      RESET           = 'reset'
       LET             = 'let'
       UNSET           = 'unset'
       LIVE            = 'live'

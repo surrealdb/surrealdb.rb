@@ -48,6 +48,7 @@ module SurrealDB
         when Protocol::Methods::SIGNUP then store_tokens(result)
         when Protocol::Methods::AUTHENTICATE then store_tokens(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
+        when Protocol::Methods::RESET then reset
         when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = params[1]
         when Protocol::Methods::UNSET then @variables.delete(params[0].to_s)
         end
@@ -77,19 +78,32 @@ module SurrealDB
         @signin = nil
       end
 
+      # Forgets everything, as the server does on `reset`.
+      def reset
+        clear_auth
+        @namespace = nil
+        @database = nil
+        @variables.clear
+      end
+
       private
 
-      # The server answers `use` with the resulting namespace and database.
-      # Older servers answer with nothing, so fall back to the params, where a
-      # String sets a value, nil clears it and NONE leaves it alone.
+      # The server answers `use` with the resulting namespace and database
+      # (NONE for one that is not set). Older servers answer with nothing, so
+      # fall back to the params, where a String sets a value, nil clears it
+      # and NONE leaves it alone.
       def track_use(params, result)
         if result.is_a?(Hash) && (result.key?('namespace') || result.key?('database'))
-          @namespace = result['namespace']
-          @database = result['database']
+          @namespace = present(result['namespace'])
+          @database = present(result['database'])
         else
           @namespace = use_value(params[0], @namespace)
           @database = use_value(params[1], @database)
         end
+      end
+
+      def present(value)
+        value.is_a?(SurrealDB::None) ? nil : value
       end
 
       def use_value(value, current)

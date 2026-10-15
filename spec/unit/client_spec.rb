@@ -269,3 +269,12 @@ RSpec.describe SurrealDB::Client do
     end
   end
 end
+
+RSpec.describe SurrealDB::Client, '#healthy?' do
+  it 'is false when the server cannot be reached' do
+    port = TCPServer.open('127.0.0.1', 0) { |server| server.addr[1] } # a port nobody listens on
+    client = described_class.new("http://127.0.0.1:#{port}", timeout: 2)
+    expect(client.healthy?).to be(false)
+    expect { client.health }.to raise_error(SurrealDB::ConnectionError)
+  end
+end

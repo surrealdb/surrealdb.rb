@@ -68,6 +68,26 @@ client = SurrealDB::Client.new("http://localhost:8000")
 
 For in-process use without a server, see [Embedded Database](#embedded-database).
 
+## Namespace, Database and Session State
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+
+  db.use("test", "test")      # => { "namespace" => "test", "database" => "test" }
+  db.use(database: "staging") # change only the database
+  db.use("other")             # change only the namespace
+  db.use(database: nil)       # clear the database
+
+  # Back to a fresh session: signed out, nothing selected, no variables,
+  # live queries killed and open transactions cancelled
+  db.reset
+
+  db.health   # raises unless the server's /health route reports it healthy
+  db.healthy? # => true or false
+end
+```
+
 ## Authentication
 
 ```ruby

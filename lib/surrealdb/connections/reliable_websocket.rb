@@ -30,7 +30,7 @@ module SurrealDB
         Protocol::Methods::PING, Protocol::Methods::VERSION, Protocol::Methods::INFO,
         Protocol::Methods::SELECT, Protocol::Methods::USE, Protocol::Methods::LET, 'set',
         Protocol::Methods::UNSET, Protocol::Methods::AUTHENTICATE, Protocol::Methods::INVALIDATE,
-        Protocol::Methods::SESSIONS, Protocol::Methods::DETACH
+        Protocol::Methods::SESSIONS, Protocol::Methods::DETACH, Protocol::Methods::RESET
       ].freeze
 
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
@@ -90,6 +90,10 @@ module SurrealDB
 
       def http_endpoint
         @inner.http_endpoint
+      end
+
+      def health
+        @inner.health
       end
 
       def session_state(session = nil)
@@ -161,16 +165,24 @@ module SurrealDB
       end
 
       def track_live(method, params, session, result)
+        track_transaction(method, params, result)
         case method
-        when Protocol::Methods::BEGIN_TXN
-          @state_mutex.synchronize { @transactions[result.to_s] = @generation }
-        when *TXN_FINISH
-          @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         when Protocol::Methods::LIVE
           @state_mutex.synchronize { @lives[result.to_s] = { params: params, session: session, current: result } }
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
+        when Protocol::Methods::RESET # the server killed the session's live queries
+          @state_mutex.synchronize { @lives.delete_if { |_, live| live[:session] == session } }
+        end
+      end
+
+      def track_transaction(method, params, result)
+        case method
+        when Protocol::Methods::BEGIN_TXN
+          @state_mutex.synchronize { @transactions[result.to_s] = @generation }
+        when *TXN_FINISH
+          @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
       end
 

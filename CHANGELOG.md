@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Clearing the namespace or database with `use` left the SDK holding a `NONE` value, which
+  HTTP connections then sent as the namespace or database header.
 - README examples that did not run: the Queries example selected from a table before
   creating it and called an undefined function, the Live Queries example watched a table
   that did not exist, the geometry example used undefined variables, and the error handling
@@ -56,6 +58,15 @@
   reconnect starts as soon as the drop is noticed.
 
 ### Added
+
+- `use` changes the namespace or the database alone and can clear either: a String selects
+  it, `nil` clears it and `SurrealDB::NONE` (the default) leaves it unchanged, positionally
+  or as `namespace:` / `database:` keywords. It returns the resulting namespace and database.
+- `reset` returns the session to its initial state (signed out, nothing selected, no
+  variables), as the server's `reset` method does; the server also kills the session's live
+  queries and cancels its transactions.
+- `health` checks the server's HTTP `/health` route (raising when it is unhealthy or
+  unreachable) and `healthy?` answers true or false.
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)
   returns a `SurrealDB::Transaction` whose query and CRUD calls carry the transaction id;

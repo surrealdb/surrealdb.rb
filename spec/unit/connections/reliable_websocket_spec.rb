@@ -213,6 +213,23 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe 'reset' do
+    it 'forgets the live queries the server killed with the session' do
+      reliable.send_request('live', ['person'])
+      reliable.send_request('reset')
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('version')
+      expect(methods_sent).not_to include('live')
+    end
+
+    it 'is repeated when it was in flight' do
+      inner.fail_next(SurrealDB::ConnectionError.new('connection closed'))
+      expect(reliable.send_request('reset')).to eq('ok')
+      expect(methods_sent.count('reset')).to eq(2)
+    end
+  end
+
   describe '#on_notification' do
     it 'registers a handler on the inner connection' do
       reliable.on_notification('live-id', proc {})

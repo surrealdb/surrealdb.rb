@@ -16,11 +16,38 @@ module SurrealDB
     # --- Namespace / Database ---
 
     # Selects the namespace and database to use.
-    # @param namespace [String]
-    # @param database [String]
+    #
+    # Either can be left as it is or cleared: a String selects it, `nil`
+    # clears it, and {SurrealDB::NONE} (the default) leaves it unchanged.
+    #
+    # @example
+    #   db.use("app", "prod")       # both
+    #   db.use("app")               # namespace only; the database is unchanged
+    #   db.use(database: "staging") # database only
+    #   db.use(database: nil)       # clear the database
+    # @param ns [String, nil, None] namespace
+    # @param db [String, nil, None] database
+    # @param namespace [String, nil, None] namespace, as a keyword
+    # @param database [String, nil, None] database, as a keyword
+    # @return [Hash{String => String, nil}] the resulting "namespace" and "database"
+    def use(ns = NONE, db = NONE, namespace: ns, database: db)
+      result = rpc(Protocol::Methods::USE, [namespace, database])
+      state = request_state
+      { 'namespace' => state&.namespace, 'database' => state&.database }.tap do |current|
+        next unless result.is_a?(Hash)
+
+        current['namespace'] = present(result['namespace'])
+        current['database'] = present(result['database'])
+      end
+    end
+
+    # Resets the session to how it was when it was opened: signs out, clears
+    # the namespace, database and variables, kills its live queries and
+    # cancels its open transactions.
     # @return [void]
-    def use(namespace, database)
-      rpc(Protocol::Methods::USE, [namespace, database])
+    def reset
+      rpc(Protocol::Methods::RESET, [])
+      nil
     end
 
     # --- Authentication ---
@@ -208,6 +235,14 @@ module SurrealDB
     end
 
     private
+
+    def present(value)
+      value.is_a?(None) ? nil : value
+    end
+
+    def request_state
+      connection.session_state(request_session)
+    end
 
     # Servers from 3.1 answer a failed import with 422 and only the failed
     # statements; older ones answer 200 with every statement's result. Both
