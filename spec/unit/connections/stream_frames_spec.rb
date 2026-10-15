@@ -76,6 +76,18 @@ RSpec.describe SurrealDB::Connections::WebSocket, '#execute_stream' do
     expect(reader_freed).to be(true)
   end
 
+  it 'does not wait for the cancellation past the time the caller had' do
+    connection.instance_variable_set(:@connected, true)
+    sent = []
+    allow(connection).to receive(:write_frame) { |encoded, *| sent << SurrealDB::CBOR::Decoder.decode(encoded) }
+    allow(connection).to receive(:execute) { sleep 2 } # a cancellation the server is slow to answer
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    expect { connection.send(:execute_stream, 'query_stream', ['SELECT 1'], timeout: 0.1) { nil } }
+      .to raise_error(SurrealDB::TimeoutError)
+    expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 0.5
+    expect(sent.map { |request| request['method'] }).to eq(%w[query_stream query_cancel])
+  end
+
   it 'stops streaming on this connection when the server refuses to stop a stream' do
     connection.instance_variable_set(:@connected, true)
     allow(connection).to receive(:write_frame) do

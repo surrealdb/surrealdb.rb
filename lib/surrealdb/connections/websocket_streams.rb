@@ -60,10 +60,12 @@ module SurrealDB
         @mutex.synchronize { @streams[id] = frames }
         done = false
         timeout ||= @timeout
+        deadline = monotonic_now + timeout
         begin
-          write_frame(encoded, monotonic_now + timeout, method)
+          write_frame(encoded, deadline, method)
           until done
             begin
+              deadline = monotonic_now + timeout
               result = next_stream_frame(frames, timeout)
             rescue ServerError
               done = true # the server answered with an error: there is no stream to stop
@@ -77,7 +79,7 @@ module SurrealDB
           # Frees the reader thread if it is waiting for room for another
           # frame, so it can read the cancellation's response.
           frames.close
-          cancel_stream(id) unless done
+          cancel_stream(id, deadline) unless done
         end
       end
 
@@ -105,16 +107,29 @@ module SurrealDB
       # cannot stop a stream, which then runs to the end with its frames
       # dropped. Later queries on this connection run buffered instead, so
       # there is never a stream to leave running.
-      def cancel_stream(id)
+      #
+      # The cancellation waits for its answer only as long as the caller's
+      # wait for the next frame had left; with no time left, it is sent
+      # without waiting.
+      def cancel_stream(id, deadline)
         return unless @connected
 
-        execute(Protocol::Methods::QUERY_CANCEL, [id], timeout: [@timeout, 5].min)
+        left = [deadline - monotonic_now, @timeout, 5].min
+        return send_without_answer(Protocol::Methods::QUERY_CANCEL, [id]) unless left.positive?
+
+        execute(Protocol::Methods::QUERY_CANCEL, [id], timeout: left)
       rescue ServerError => e
         streaming_unavailable!
         log(:warn, "The server refused to stop stream #{id} (#{e.message}); it runs on, and later queries " \
                    'on this connection will not stream')
       rescue Error => e
         log(:debug, "query_cancel for stream #{id} failed: #{e.message}")
+      end
+
+      # The answer, when it comes, matches no request and is dropped.
+      def send_without_answer(method, params)
+        _id, encoded = @rpc.encode_request(method, params)
+        write_frame(encoded, monotonic_now + 1, method)
       end
     end
   end

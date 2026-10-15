@@ -30,6 +30,7 @@ module SurrealDB
       @id = id
       @session = session
       @state = :open
+      @streams = 0
     end
 
     # Makes the transaction's writes permanent.
@@ -76,6 +77,10 @@ module SurrealDB
 
     def finish(method, state)
       raise TransactionError, "transaction #{@id} is already #{@state}" unless open?
+      if method == Protocol::Methods::COMMIT && @streams.positive?
+        raise TransactionError, "a query_stream in transaction #{@id} has not finished; read it to the end " \
+                                'before committing, as the server commits only what has run so far'
+      end
 
       request(method, [@id])
       @state = state
@@ -112,8 +117,13 @@ module SurrealDB
     def stream_rpc(method, params, timeout, &)
       raise TransactionError, "transaction #{@id} is #{@state}" unless open?
 
-      @connection.stream_request(method, params, session: @session, txn: @id, **timeout_option(timeout), &)
-    rescue RequestInterruptedError
+      @streams += 1
+      begin
+        @connection.stream_request(method, params, session: @session, txn: @id, **timeout_option(timeout), &)
+      ensure
+        @streams -= 1
+      end
+    rescue ConnectionError
       @state = :lost
       raise
     rescue TimeoutError => e
