@@ -87,6 +87,11 @@ RSpec.describe SurrealDB::RecordID do
       expect(rid.to_s).to eq('test:[1, "two"]')
     end
 
+    it 'formats uuid ids as uuid literals' do
+      uuid = SurrealDB::Uuid.parse('0190d5ab-7c3e-7d2a-9f1b-123456789abc')
+      expect(described_class.new('user', uuid).to_s).to eq('user:u"0190d5ab-7c3e-7d2a-9f1b-123456789abc"')
+    end
+
     it 'escapes table names that are not identifiers' do
       expect(described_class.new('person:alice', 'x').to_s).to eq("\u27E8person:alice\u27E9:x")
     end

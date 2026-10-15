@@ -45,6 +45,12 @@ module SurrealDB
           SurrealDB::RecordID.new(value[0], resolve(value[1]))
         when Tags::UUID_STRING, Tags::UUID_BINARY
           resolve_uuid(tag, value)
+        when Tags::DATETIME_STRING
+          Time.iso8601(value).utc
+        when Tags::FILE
+          SurrealDB::FileRef.new(value[0], value[1])
+        when Tags::SET
+          ::Set.new(value.map { |v| resolve(v) })
         when Tags::DECIMAL_STRING
           BigDecimal(value)
         when Tags::DATETIME_COMPACT
@@ -72,11 +78,10 @@ module SurrealDB
       end
 
       def resolve_uuid(tag, value)
-        if tag == Tags::UUID_BINARY && value.is_a?(String)
-          hex = value.unpack1('H32')
-          "#{hex[0, 8]}-#{hex[8, 4]}-#{hex[12, 4]}-#{hex[16, 4]}-#{hex[20, 12]}"
+        if tag == Tags::UUID_BINARY && value.bytesize == 16
+          SurrealDB::Uuid.new(value)
         else
-          value.to_s
+          SurrealDB::Uuid.parse(value)
         end
       end
 

@@ -104,6 +104,7 @@ module SurrealDB
     def format_id(value)
       case value
       when String then escape_ident(value)
+      when Uuid then "u\"#{value}\""
       when Array then "[#{value.map { |v| format_value(v) }.join(', ')}]"
       when Hash then format_object_id(value)
       else value.to_s
@@ -113,6 +114,7 @@ module SurrealDB
     def format_value(value)
       case value
       when String then value.inspect
+      when Uuid then "u\"#{value}\""
       when Array then "[#{value.map { |v| format_value(v) }.join(', ')}]"
       when Hash then format_object_id(value)
       else value.to_s

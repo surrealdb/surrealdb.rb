@@ -294,6 +294,17 @@ rid.id     # => "alice"
 # Table
 table = SurrealDB::Table.new("person")
 
+# Uuid (CBOR tag 37); server UUIDs decode to this, never to String
+uuid = SurrealDB::Uuid.v7
+uuid = SurrealDB::Uuid.parse("0190d5ab-7c3e-7d2a-9f1b-123456789abc")
+SurrealDB::RecordID.new("person", uuid)
+
+# Set (CBOR tag 56) maps to Ruby's Set
+Set[1, 2, 3]
+
+# File pointer (CBOR tag 55), f"bucket:/key" in SurrealQL
+SurrealDB::FileRef.new("avatars", "/alice.png")
+
 # Duration
 duration = SurrealDB::Duration.parse("1h30m")
 duration.secs   # => 5400

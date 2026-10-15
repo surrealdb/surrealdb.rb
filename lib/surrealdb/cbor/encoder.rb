@@ -29,6 +29,12 @@ module SurrealDB
           ::CBOR::Tagged.new(Tags::RECORD_ID, [obj.table, prepare(obj.id)])
         when SurrealDB::StringRecordID
           ::CBOR::Tagged.new(Tags::RECORD_ID, obj.value)
+        when SurrealDB::Uuid
+          ::CBOR::Tagged.new(Tags::UUID_BINARY, obj.bytes)
+        when SurrealDB::FileRef
+          ::CBOR::Tagged.new(Tags::FILE, [obj.bucket, obj.key])
+        when ::Set
+          ::CBOR::Tagged.new(Tags::SET, obj.map { |v| prepare(v) })
         when SurrealDB::Duration
           ::CBOR::Tagged.new(Tags::DURATION_COMPACT, [obj.secs, obj.nanos])
         when SurrealDB::Range

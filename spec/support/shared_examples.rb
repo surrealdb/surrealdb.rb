@@ -171,3 +171,50 @@ RSpec.shared_examples 'auth operations' do
     expect(client.version).to be_a(String)
   end
 end
+
+RSpec.shared_examples 'value round-trips' do
+  let(:table) { unique_table('types') }
+
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  it 'decodes server UUIDs as Uuid, not String' do
+    expect(value_of('RETURN rand::uuid::v7()')).to be_a(SurrealDB::Uuid)
+  end
+
+  it 'sends Uuid as a uuid, not a string' do
+    uuid = SurrealDB::Uuid.v4
+    expect(value_of('RETURN [type::is_uuid($u), type::is_string($u), $u]', { 'u' => uuid })).to eq([true, false, uuid])
+  end
+
+  it 'round-trips a uuid-keyed record id' do
+    rid = SurrealDB::RecordID.new(table, SurrealDB::Uuid.v7)
+    created = client.create(rid, { 'n' => 1 })
+    created = created[0] if created.is_a?(Array)
+    expect(created['id']).to eq(rid)
+    selected = client.select(rid)
+    selected = selected[0] if selected.is_a?(Array)
+    expect(selected).to eq({ 'id' => rid, 'n' => 1 })
+  end
+
+  it 'round-trips sets' do
+    expect(value_of('RETURN <set>[3, 1, 1]')).to eq(Set[1, 3])
+    expect(value_of('RETURN $s', { 's' => Set['a', 'b'] })).to eq(Set['a', 'b'])
+  end
+
+  it 'round-trips file pointers' do
+    file = SurrealDB::FileRef.new('bucket', '/some/key.txt')
+    expect(value_of('RETURN $f', { 'f' => file })).to eq(file)
+  end
+
+  it 'round-trips datetimes with nanosecond precision, before and after 1970' do
+    [Time.utc(2024, 2, 29, 12, 0, 0, Rational(123_456_789, 1000)), Time.utc(1969, 7, 20, 20, 17, 40.5r)].each do |time|
+      back = value_of('RETURN $t', { 't' => time })
+      expect(back).to eq(time)
+      expect(value_of('RETURN type::is_datetime($t)', { 't' => time })).to be(true)
+    end
+  end
+end

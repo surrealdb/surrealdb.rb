@@ -5,6 +5,7 @@ module SurrealDB
     # SurrealDB custom CBOR tag numbers.
     # These match the tag definitions in the Go and Python SDKs.
     module Tags
+      DATETIME_STRING   = 0 # RFC 3339 text; decoded only
       NONE              = 6
       TABLE             = 7
       RECORD_ID         = 8
@@ -18,6 +19,8 @@ module SurrealDB
       RANGE             = 49
       BOUND_INCLUDED    = 50
       BOUND_EXCLUDED    = 51
+      FILE              = 55
+      SET               = 56
       GEOMETRY_POINT    = 88
       GEOMETRY_LINE     = 89
       GEOMETRY_POLYGON  = 90
