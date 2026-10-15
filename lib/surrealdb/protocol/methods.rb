@@ -26,8 +26,6 @@ module SurrealDB
       DELETE          = 'delete'
       RELATE          = 'relate'
       RUN             = 'run'
-      IMPORT          = 'import'
-      EXPORT          = 'export'
       ATTACH          = 'attach'
       DETACH          = 'detach'
       SESSIONS        = 'sessions'

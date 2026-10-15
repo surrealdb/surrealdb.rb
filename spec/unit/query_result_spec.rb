@@ -28,6 +28,25 @@ RSpec.describe SurrealDB::QueryResult do
       expect(qr.error).to eq('table not found')
     end
 
+    it 'reads a failed statement the way the server sends it' do
+      qr = described_class.from_response({
+                                           'status' => 'ERR', 'time' => '1ms',
+                                           'result' => "The table 'x' does not exist",
+                                           'kind' => 'NotFound',
+                                           'details' => { 'kind' => 'Table', 'details' => { 'name' => 'x' } }
+                                         })
+      expect(qr.error).to eq("The table 'x' does not exist")
+      expect(qr.result).to be_nil
+      error = qr.to_error
+      expect(error).to be_a(SurrealDB::NotFoundError)
+      expect(error.message).to eq("The table 'x' does not exist")
+      expect(error.details).to eq({ 'kind' => 'Table', 'details' => { 'name' => 'x' } })
+    end
+
+    it 'has no error for a successful statement' do
+      expect(described_class.from_response({ 'status' => 'OK', 'result' => 1 }).to_error).to be_nil
+    end
+
     it 'wraps non-hash data as an OK result' do
       qr = described_class.from_response([1, 2, 3])
       expect(qr).to be_ok

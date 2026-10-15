@@ -11,8 +11,9 @@ module SurrealDB
       # @return [Protocol::RPC]
       attr_reader :rpc
 
-      def initialize(url, **_options)
+      def initialize(url, **options)
         @url = url
+        @http_timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
         @rpc = Protocol::RPC.new
         @connected = false
         @state_mutex = Mutex.new
@@ -65,6 +66,27 @@ module SurrealDB
       # @return [Boolean]
       def supports_transactions?
         true
+      end
+
+      # The server's plain HTTP routes (/import, /export, /health).
+      # @return [HTTPEndpoint]
+      def http_endpoint
+        @http_endpoint ||= HTTPEndpoint.new(@url, timeout: @http_timeout)
+      end
+
+      # Sends a request to one of the server's HTTP routes (/import, /export)
+      # with a session's namespace, database and credentials. Like RPC
+      # requests, it is refused once the connection, or the session, has been
+      # closed.
+      # @param session [Uuid, nil]
+      # @return [Net::HTTPResponse]
+      # @raise [ConnectionError] if the connection is not open
+      # @raise [SessionError] if the session has been detached
+      def http_request(verb, path, session: nil, **, &)
+        raise ConnectionError, 'not connected' unless @connected
+        raise SessionError, "session #{session} is closed" if session && session_state(session).nil?
+
+        http_endpoint.request(verb, path, state: session_state(session), **, &)
       end
 
       # Whether the server answers `sessions` (listing attached sessions) on

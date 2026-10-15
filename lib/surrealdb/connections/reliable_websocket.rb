@@ -65,6 +65,10 @@ module SurrealDB
         @inner.send_request(method, params, session: session, txn: txn)
       end
 
+      def http_endpoint
+        @inner.http_endpoint
+      end
+
       def session_state(session = nil)
         @inner.session_state(session)
       end

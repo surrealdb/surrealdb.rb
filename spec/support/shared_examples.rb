@@ -318,3 +318,97 @@ RSpec.shared_examples 'sessions' do
     end
   end
 end
+
+RSpec.shared_examples 'import and export' do
+  let(:table) { unique_table('impexp') }
+
+  after { client.close }
+
+  def rid(key)
+    SurrealDB::RecordID.new(table, key)
+  end
+
+  it 'imports SurrealQL through the HTTP route' do
+    client.import("OPTION IMPORT; DEFINE TABLE #{table} SCHEMALESS; " \
+                  "CREATE #{table}:one SET n = 1; CREATE #{table}:two SET n = 2;")
+    expect(client.select(table).map { |r| r['n'] }.sort).to eq([1, 2])
+  end
+
+  it 'imports from an IO' do
+    client.import(StringIO.new("OPTION IMPORT; CREATE #{table}:io SET n = 3;"))
+    expect(client.select(rid('io'))).to include('n' => 3)
+  end
+
+  it 'passes on the server refusing content without OPTION IMPORT' do
+    expect { client.import("CREATE #{table}:x") }.to raise_error(SurrealDB::ServerError, /OPTION IMPORT/)
+  end
+
+  it 'reports failed statements, keeping the ones that ran' do
+    sql = "OPTION IMPORT; CREATE #{table}:ok SET n = 1; THROW 'import broke'; CREATE #{table}:after SET n = 2;"
+    expect { client.import(sql) }.to raise_error(SurrealDB::ImportError) { |e|
+      expect(e.count).to eq(1)
+      expect(e.failures.first).to be_a(SurrealDB::ServerError)
+      expect(e.failures.first.message).to include('import broke')
+    }
+    expect(client.select(rid('ok'))).to include('n' => 1)
+  end
+
+  it 'refuses an import without credentials' do
+    anonymous = SurrealDB::Client.new(client.connection.url)
+    anonymous.connect
+    anonymous.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    expect { anonymous.import("OPTION IMPORT; CREATE #{table}:nope") }.to raise_error(SurrealDB::NotAllowedError)
+  ensure
+    anonymous&.close
+  end
+
+  it 'exports the database as SurrealQL' do
+    client.create(rid('exported'), { 'name' => 'Alice' })
+    sql = client.export
+    expect(sql).to include("DEFINE TABLE #{table}")
+    expect(sql).to include('Alice')
+    expect(sql.encoding).to eq(Encoding::UTF_8)
+  end
+
+  it 'exports with options' do
+    other = unique_table('other')
+    client.create(rid('a'), { 'name' => 'Alice' })
+    client.create(SurrealDB::RecordID.new(other, 'b'), { 'name' => 'Bob' })
+    sql = client.export(tables: [table], records: false)
+    expect(sql).to include("DEFINE TABLE #{table}")
+    expect(sql).not_to include(other)
+    expect(sql).not_to include('Alice')
+  end
+
+  it 'streams an export to a block' do
+    client.create(rid('streamed'), { 'name' => 'Streamy' })
+    chunks = []
+    expect(client.export { |chunk| chunks << chunk }).to be_nil
+    expect(chunks.join).to include('Streamy')
+  end
+
+  it 'passes on an error the export block raises, not as a connection error' do
+    expect { client.export { |_chunk| raise Errno::ENOSPC } }.to raise_error(Errno::ENOSPC)
+  end
+
+  it 'refuses import and export once the client is closed' do
+    client.close
+    expect { client.export }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+  end
+
+  it 'refuses import and export from a closed session, rather than sending them signed out' do
+    session = client.new_session
+    session.close
+    expect { session.export }.to raise_error(SurrealDB::SessionError, /closed/)
+    expect { session.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::SessionError, /closed/)
+  end
+
+  it 'round-trips an export through an import' do
+    client.create(rid('rt'), { 'name' => 'Round', 'tags' => %w[a b] })
+    sql = client.export(tables: [table])
+    client.query("REMOVE TABLE #{table}")
+    client.import(sql)
+    expect(client.select(rid('rt'))).to include('name' => 'Round', 'tags' => %w[a b])
+  end
+end

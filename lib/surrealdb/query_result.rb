@@ -17,11 +17,31 @@ module SurrealDB
     # @return [String, nil] error message if status is "ERR"
     attr_reader :error
 
-    def initialize(status:, time: nil, result: nil, error: nil)
+    # @return [String, nil] structured error kind if status is "ERR"
+    attr_reader :kind
+
+    # @return [Hash, nil] structured error details if status is "ERR"
+    attr_reader :details
+
+    def initialize(status:, time: nil, result: nil, error: nil, kind: nil, details: nil, cause: nil) # rubocop:disable Metrics/ParameterLists
       @status = status
       @time = time
       @result = result
       @error = error
+      @kind = kind
+      @details = details
+      @cause = cause
+    end
+
+    # The statement's failure as an exception, of the {ServerError} subclass
+    # matching its kind.
+    # @return [ServerError, nil] nil when the statement succeeded
+    def to_error
+      return nil unless error?
+
+      ServerError.from_response(
+        { 'message' => @error, 'kind' => @kind, 'details' => @details, 'cause' => @cause }.compact
+      )
     end
 
     # @return [Boolean] true when the statement executed without error
@@ -40,12 +60,14 @@ module SurrealDB
     def self.from_response(data)
       return new(status: 'OK', result: data) unless data.is_a?(Hash) && data.key?('status')
 
-      new(
-        status: data['status'],
-        time: data['time'],
-        result: data['result'],
-        error: data['error']
-      )
+      # A failed statement carries its message in `result` (and, on 3.x,
+      # its structured kind, details and cause alongside).
+      if data['status'] == 'ERR'
+        return new(status: 'ERR', time: data['time'], error: (data['error'] || data['result']).to_s,
+                   kind: data['kind'], details: data['details'], cause: data['cause'])
+      end
+
+      new(status: data['status'], time: data['time'], result: data['result'])
     end
 
     def inspect

@@ -18,6 +18,12 @@
   sent without the transaction id, so the server rejected them and queries never ran inside
   the transaction.
 
+- `import_data`/`export_data` called RPC methods the server does not have. `import` and
+  `export` now use the HTTP `/import` and `/export` routes (from any connection type), and a
+  failed import raises `ImportError` listing the failed statements.
+- `QueryResult#error` was empty for failed statements; it now carries the server's message,
+  with `kind`, `details` and `to_error`.
+
 ### Added
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)

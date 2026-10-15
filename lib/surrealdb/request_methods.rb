@@ -10,6 +10,12 @@ module SurrealDB
   module RequestMethods
     include QueryMethods
 
+    # What a statement result's status can be.
+    STATEMENT_STATUSES = %w[OK ERR].freeze
+
+    # Keeps at most this many import failures on an {ImportError}.
+    KEPT_IMPORT_FAILURES = 100
+
     # --- Namespace / Database ---
 
     # Selects the namespace and database to use.
@@ -146,6 +152,59 @@ module SurrealDB
       nil
     end
 
+    # --- Import / Export ---
+
+    # Imports SurrealQL into the current namespace and database, through the
+    # server's HTTP /import route (there is no RPC method for it). Runs with
+    # this session's namespace, database and credentials.
+    #
+    # The content must start with `OPTION IMPORT;`, as exports do; the server
+    # refuses anything else. An import is not atomic: statements before a
+    # failure stay applied.
+    #
+    # @param content [String, IO] SurrealQL, or an IO to stream it from
+    # @return [void]
+    # @raise [ImportError] if any statement failed
+    # @raise [ServerError] if the server refused the import
+    def import(content)
+      response = connection.http_request(
+        :post, '/import',
+        session: request_session,
+        body: content,
+        headers: { 'Content-Type' => 'text/plain', 'Accept' => 'application/cbor' }
+      )
+      raise_import_failures(response)
+      nil
+    end
+    alias import_data import
+
+    # Exports the current database as SurrealQL, through the server's HTTP
+    # /export route. Runs with this session's namespace, database and
+    # credentials.
+    #
+    # Options select what is exported, e.g. `tables: ["person"]`,
+    # `records: false`, `users: false`, `versions: true`. Omitted options
+    # take the server's defaults.
+    #
+    # @param options [Hash] export configuration
+    # @yield [String] chunks of the export as they arrive, when given
+    # @return [String, nil] the export, or nil when streamed to a block
+    def export(**options, &block)
+      verb, body, headers = if options.empty?
+                              [:get, nil, {}]
+                            else
+                              [:post, ::CBOR.encode(CBOR::Encoder.prepare(options.transform_keys(&:to_s))),
+                               { 'Content-Type' => 'application/cbor' }]
+                            end
+      response = connection.http_request(
+        verb, '/export',
+        session: request_session, body: body, headers: headers.merge('Accept' => 'text/plain'), &block
+      )
+      Connections::HTTPEndpoint.raise_for(response, 'export') unless response.is_a?(Net::HTTPSuccess)
+      block ? nil : response.body.to_s.dup.force_encoding(Encoding::UTF_8)
+    end
+    alias export_data export
+
     # --- Info ---
 
     # Returns info about the current session.
@@ -167,6 +226,42 @@ module SurrealDB
     end
 
     private
+
+    # Servers from 3.1 answer a failed import with 422 and only the failed
+    # statements; older ones answer 200 with every statement's result. Both
+    # are read the same way: whatever came back with status ERR failed.
+    def raise_import_failures(response)
+      ok = response.is_a?(Net::HTTPSuccess)
+      return Connections::HTTPEndpoint.raise_for(response, 'import') unless ok || response.code == '422'
+
+      failures = import_failures(response.body.to_s, ok)
+      if failures.any?
+        errors = failures.first(KEPT_IMPORT_FAILURES).map { |f| QueryResult.from_response(f).to_error }
+        raise ImportError.new(errors, failures.length)
+      end
+      Connections::HTTPEndpoint.raise_for(response, 'import') unless ok
+    end
+
+    # An answer to a successful import that is not a list of statement
+    # results cannot show that every statement succeeded, so it is an error
+    # rather than an empty list.
+    def import_failures(body, succeeded)
+      results = begin
+        CBOR::Decoder.decode(body)
+      rescue StandardError => e
+        raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+      end
+      unless statement_results?(results)
+        raise ProtocolError, "the import's result is not a list of statement results" if succeeded
+
+        return []
+      end
+      results.select { |r| r['status'] == 'ERR' }
+    end
+
+    def statement_results?(results)
+      results.is_a?(Array) && results.all? { |r| r.is_a?(Hash) && STATEMENT_STATUSES.include?(r['status']) }
+    end
 
     # Commits after the block returns normally. Anything else (an exception,
     # or `return`/`break`/`throw` leaving the block) skips the commit, so the
