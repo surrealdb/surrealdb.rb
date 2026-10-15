@@ -228,3 +228,30 @@ RSpec.describe SurrealDB::Client do
     end
   end
 end
+
+RSpec.describe SurrealDB::Connections::HTTP, '#close' do
+  let(:connection) { described_class.new('http://localhost:8000') }
+  let(:first) { SurrealDB::Uuid.v4 }
+  let(:second) { SurrealDB::Uuid.v4 }
+
+  before do
+    connection.instance_variable_set(:@connected, true)
+    allow(connection).to receive(:execute).and_return(nil)
+    connection.send_request('attach', [], session: first)
+    connection.send_request('attach', [], session: second)
+  end
+
+  it 'detaches the sessions still attached, which the server would otherwise keep' do
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', [], session: first)
+    expect(connection).to have_received(:execute).with('detach', [], session: second)
+    expect(connection).not_to be_connected
+  end
+
+  it 'stops trying once the server cannot be reached' do
+    allow(connection).to receive(:execute).with('detach', any_args).and_raise(SurrealDB::ConnectionError, 'down')
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', any_args).once
+    expect(connection).not_to be_connected
+  end
+end
