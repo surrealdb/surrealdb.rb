@@ -523,7 +523,7 @@ client.signin("user" => "root", "pass" => "root")
 client.use("test", "test")
 
 # Per-call timeouts: for one query, or for everything in a block
-client.query("SELECT * FROM person", timeout: 2)
+client.query("RETURN time::now()", timeout: 2)
 client.with_timeout(30) do
   client.query("SLEEP 100ms")
 end
