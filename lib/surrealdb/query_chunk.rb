@@ -26,12 +26,17 @@ module SurrealDB
     # @return [ServerError, nil] why the statement failed (:finished only)
     attr_reader :error
 
-    def initialize(index:, kind:, values: [], time: nil, error: nil)
+    # @return [Boolean, nil] whether the statement's result is one value
+    #   rather than a list of rows (:finished chunks from a stream only)
+    attr_reader :single
+
+    def initialize(index:, kind:, values: [], time: nil, error: nil, single: nil) # rubocop:disable Metrics/ParameterLists
       @index = index
       @kind = kind
       @values = values
       @time = time
       @error = error
+      @single = single
     end
 
     # Builds a chunk from a `query_stream` frame.
@@ -43,7 +48,23 @@ module SurrealDB
       case frame['stream']
       when 'rows' then new(index: index, kind: :rows, values: Array(frame['values']))
       when 'value' then new(index: index, kind: :value, values: [frame['value']])
-      when 'finished' then new(index: index, kind: :finished, time: frame['time'], error: frame_error(frame['error']))
+      when 'finished'
+        new(index: index, kind: :finished, time: frame['time'], error: frame_error(frame['error']),
+            single: frame['single'])
+      end
+    end
+
+    # The result chunk a stream leaves out for a statement that sent no rows
+    # or value frame: an empty list, or NONE when `single` says the result is
+    # one value. Buffered results always have one, so streamed ones get it
+    # too.
+    # @param finished [QueryChunk] the statement's :finished chunk
+    # @return [QueryChunk]
+    def self.implied_by(finished)
+      if finished.single
+        new(index: finished.index, kind: :value, values: [NONE])
+      else
+        new(index: finished.index, kind: :rows, values: [])
       end
     end
 

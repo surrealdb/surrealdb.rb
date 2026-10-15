@@ -335,9 +335,10 @@ module SurrealDB
       # Hands a response to the request or stream waiting for it.
       # @return [Boolean] false when nothing is waiting for that id
       def deliver_response(id, bytes)
-        @mutex.synchronize do
+        stream = nil
+        delivered = @mutex.synchronize do
           stream = @streams[id]
-          next stream.push(bytes) && true if stream
+          next true if stream
 
           entry = @pending[id]
           next false unless entry
@@ -346,6 +347,9 @@ module SurrealDB
           entry[:cv].signal
           true
         end
+        # Outside the mutex: feeding a stream can wait for its reader.
+        feed_stream(id, stream, bytes) if stream
+        delivered
       end
 
       def dispatch_notification(raw) # rubocop:disable Metrics/CyclomaticComplexity
@@ -384,7 +388,7 @@ module SurrealDB
             entry[:cv].signal
           end
           @pending.clear
-          @streams.each_value { |frames| frames.push(:closed) }
+          @streams.each_value { |frames| frames.fail(ConnectionError.new('connection closed')) }
           @streams.clear
         end
       end

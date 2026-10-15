@@ -27,6 +27,22 @@ RSpec.describe SurrealDB::QueryChunk do
     end
   end
 
+  describe '.implied_by' do
+    def finished(single)
+      described_class.from_frame({ 'stream' => 'finished', 'index' => 3, 'single' => single })
+    end
+
+    it 'stands for the empty list a statement with no rows frame returned' do
+      chunk = described_class.implied_by(finished(false))
+      expect([chunk.index, chunk.kind, chunk.values]).to eq([3, :rows, []])
+    end
+
+    it 'stands for NONE when the statement returns one value but sent no value frame' do
+      chunk = described_class.implied_by(finished(true))
+      expect([chunk.kind, chunk.value]).to eq([:value, SurrealDB::NONE])
+    end
+  end
+
   describe '.from_results' do
     it 'stands in for a stream from buffered results' do
       results = [
