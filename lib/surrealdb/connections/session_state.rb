@@ -176,11 +176,11 @@ module SurrealDB
       # and NONE leaves it alone.
       def track_use(params, result)
         if result.is_a?(Hash) && (result.key?('namespace') || result.key?('database'))
-          @namespace = present(result['namespace'])
-          @database = present(result['database'])
+          @namespace = snapshot(present(result['namespace']))
+          @database = snapshot(present(result['database']))
         else
-          @namespace = use_value(params[0], @namespace)
-          @database = use_value(params[1], @database)
+          @namespace = snapshot(use_value(params[0], @namespace))
+          @database = snapshot(use_value(params[1], @database))
         end
       end
 
@@ -205,26 +205,28 @@ module SurrealDB
       def select_scope(source)
         namespace = source['NS'] || source['ns']
         database = source['DB'] || source['db']
-        @namespace = namespace if namespace.is_a?(String)
-        @database = database if database.is_a?(String)
+        @namespace = snapshot(namespace) if namespace.is_a?(String)
+        @database = snapshot(database) if database.is_a?(String)
       end
 
       def store_tokens(result)
         case result
         when String
-          self.access_token = result
+          self.access_token = snapshot(result)
           @refresh_token = nil
         when Hash
-          self.access_token = result['access'] || result['token']
-          @refresh_token = result['refresh']
+          self.access_token = snapshot(result['access'] || result['token'])
+          @refresh_token = snapshot(result['refresh'])
         end
       end
 
       # Refreshing another identity's token pair switches to that identity,
-      # whose sign-in credentials are not the ones kept.
+      # whose sign-in credentials are not the ones kept, and to the scope its
+      # token names.
       def refreshed(tokens, result)
         @signin = nil unless tokens.is_a?(Hash) && tokens['access'] == @access_token
         store_tokens(result)
+        select_scope(self.class.token_claims(@access_token) || {})
       end
 
       # Re-presenting the current token (as a reconnect does) changes

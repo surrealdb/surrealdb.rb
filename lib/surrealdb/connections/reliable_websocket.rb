@@ -56,6 +56,9 @@ module SurrealDB
         # that lost them.
         @auth_lost = {}
         @on_reconnect = nil
+        # Requests between sending and recording their result.
+        @delivering = 0
+        @delivered = ConditionVariable.new
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
@@ -215,7 +218,7 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        return ended_with_connection(method, params, session, deadline) if ends_with_connection?(method, session)
+        return ended_with_connection(method, params, session, since, deadline) if ends_with_connection?(method, session)
 
         interrupted!(method, e, deadline) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
         recover(deadline, method)
@@ -253,10 +256,13 @@ module SurrealDB
       # Sends one request, translating live query ids the caller holds into
       # the ids they have on the current connection.
       def attempt(method, params, session, txn, deadline)
+        @state_mutex.synchronize { @delivering += 1 }
         params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
         result = @inner.send_request(method, params, session: session, txn: txn, **time_left(deadline, method))
         track_live(method, params, session, result)
         result
+      ensure
+        @state_mutex.synchronize { @delivered.broadcast if (@delivering -= 1).zero? }
       end
 
       def track_live(method, params, session, result)
@@ -279,35 +285,6 @@ module SurrealDB
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
-      end
-
-      # Live queries and attached sessions end with the connection, so a
-      # kill or detach the connection dropped under has done its job.
-      def ends_with_connection?(method, session)
-        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
-      end
-
-      def ended_with_connection(method, params, session, deadline)
-        method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
-        recover(deadline, method)
-        nil
-      rescue TimeoutError
-        nil # the reconnect carries on in the background
-      end
-
-      # A live query ends with the connection it was started on, so a kill
-      # the connection dropped under has done its job either way, as long as
-      # the reconnect does not start the live query again.
-      def kill_lost(id)
-        live = @state_mutex.synchronize { @lives.delete(id.to_s) }
-        @inner.remove_notification_handler(live[:current].to_s) if live
-      end
-
-      # The same goes for a detach: the session ended with the connection, so
-      # forget it and its live queries rather than restoring them.
-      def detach_lost(session)
-        @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
-        forget_lives(session)
       end
 
       # The server ended the session's live queries (reset, detach); drop them and
@@ -379,6 +356,8 @@ module SurrealDB
           return if @inner.connected?
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
+          # Requests wait (see #await_restore) until the new connection is
+          # checked and restored, not only while it is being restored.
           @restoring = true
           begin
             reconnect!
