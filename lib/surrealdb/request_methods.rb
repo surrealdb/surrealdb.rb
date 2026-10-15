@@ -227,14 +227,21 @@ module SurrealDB
       Connections::HTTPEndpoint.raise_for(response, 'import') unless ok
     end
 
-    # An unreadable answer to a successful import cannot show that every
-    # statement succeeded, so it is an error rather than an empty list.
+    # An answer to a successful import that is not a list of statement
+    # results cannot show that every statement succeeded, so it is an error
+    # rather than an empty list.
     def import_failures(body, succeeded)
-      Array(CBOR::Decoder.decode(body)).select { |r| r.is_a?(Hash) && r['status'] == 'ERR' }
-    rescue StandardError => e
-      raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+      results = begin
+        CBOR::Decoder.decode(body)
+      rescue StandardError => e
+        raise ProtocolError, "could not read the import's result (#{e.class}: #{e.message})" if succeeded
+      end
+      unless results.is_a?(Array) && results.all?(Hash)
+        raise ProtocolError, "the import's result is not a list of statement results" if succeeded
 
-      []
+        return []
+      end
+      results.select { |r| r['status'] == 'ERR' }
     end
 
     # Commits after the block returns normally. Anything else (an exception,

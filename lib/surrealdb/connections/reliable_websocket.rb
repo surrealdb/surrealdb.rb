@@ -53,11 +53,18 @@ module SurrealDB
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
+      # Connecting again after {#close} restores what the client still holds
+      # (sessions, live queries), as a reconnect does: the new connection
+      # has none of it.
       def connect
-        @closed = false
-        @inner.connect
-        @opened = true
-        @connected = true
+        @reconnect_mutex.synchronize do
+          @closed = false
+          @inner.connect
+          reopened = @opened
+          @opened = true
+          @connected = true
+          restore_state if reopened
+        end
       end
 
       def close
@@ -136,7 +143,7 @@ module SurrealDB
       rescue RequestInterruptedError
         raise
       rescue ConnectionError => e
-        return kill_lost(params[0]) if method == Protocol::Methods::KILL
+        return ended_with_connection(method, params, session) if ends_with_connection?(method, session)
 
         ensure_connected!
         raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
@@ -168,12 +175,31 @@ module SurrealDB
         end
       end
 
+      # Live queries and attached sessions end with the connection, so a
+      # kill or detach the connection dropped under has done its job.
+      def ends_with_connection?(method, session)
+        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
+      end
+
+      def ended_with_connection(method, params, session)
+        method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
+      end
+
       # A live query ends with the connection it was started on, so a kill
       # the connection dropped under has done its job either way, as long as
       # the reconnect does not start the live query again.
       def kill_lost(id)
         live = @state_mutex.synchronize { @lives.delete(id.to_s) }
         @inner.remove_notification_handler(live[:current].to_s) if live
+        ensure_connected!
+        nil
+      end
+
+      # The same goes for a detach: the session ended with the connection, so
+      # forget it and its live queries rather than restoring them.
+      def detach_lost(session)
+        @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
+        forget_lives(session)
         ensure_connected!
         nil
       end
@@ -240,17 +266,21 @@ module SurrealDB
           return if @inner.connected?
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
-          @restoring = true
-          begin
-            reconnect!
-            @generation += 1
-            restore_sessions
-            restore_live_queries
-          ensure
-            @restoring = false
-          end
+          reconnect!
+          restore_state
           log(:info, 'Reconnected')
         end
+      end
+
+      # Brings the state the server lost back on the new connection. Its
+      # transactions are gone, so they belong to the previous generation.
+      def restore_state
+        @restoring = true
+        @generation += 1
+        restore_sessions
+        restore_live_queries
+      ensure
+        @restoring = false
       end
 
       # A request made while a reconnect is restoring sessions would reach a

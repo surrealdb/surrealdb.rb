@@ -12,6 +12,27 @@ RSpec.describe SurrealDB::Connections::SessionState do
     expect(state.copy.variables['v']).to eq({ 'tags' => ['a'], 'name' => 'x' })
   end
 
+  it 'keeps the sign-in credentials as they were sent' do
+    credentials = { 'user' => 'u', 'pass' => +'p' }
+    state = described_class.new
+    state.track('signin', [credentials], 'token')
+    credentials['pass'] << 'changed'
+    credentials.delete('user')
+    expect(state.signin).to eq(['signin', [{ 'user' => 'u', 'pass' => 'p' }]])
+  end
+
+  it 'forgets the sign-in credentials when a signup or another token changes the identity' do
+    state = described_class.new
+    state.track('signin', [{ 'user' => 'u' }], 'token')
+    state.track('authenticate', ['token'], nil) # the same token again: still that sign-in
+    expect(state.signin).not_to be_nil
+    state.track('authenticate', ['someone-else'], nil)
+    expect(state.signin).to be_nil
+    state.track('signin', [{ 'user' => 'u' }], 'token')
+    state.track('signup', [{ 'ac' => 'user' }], 'new-token')
+    expect(state.signin).to be_nil
+  end
+
   it 'keeps a Set variable as it was set, too' do
     value = Set[['a'], ['b']]
     state = described_class.new
