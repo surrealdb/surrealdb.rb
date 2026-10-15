@@ -6,6 +6,10 @@ module SurrealDB
     # with its namespace, database, variables and credentials, and every
     # live query started with `live`.
     module ReliableRestore
+      # How long a restore waits for requests whose response already arrived
+      # to record it (see #await_deliveries).
+      DELIVERY_WAIT = 1.0
+
       private
 
       # Brings the state the server lost back on the new connection. Its
@@ -37,12 +41,33 @@ module SurrealDB
         rescue ServerError => e
           log(:error, "Could not restore the default session: #{e.message}")
         end
-        @inner.attached_sessions.each do |id, state|
+        sessions = @state_mutex.synchronize do
+          @ending_sessions.clear
+          @inner.attached_sessions
+        end
+        sessions.each do |id, state|
           @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
-          restore_session(id, state)
+          begin
+            restore_session(id, state)
+          ensure
+            settle_session(id)
+          end
         rescue ServerError => e
           log(:error, "Could not restore session #{id}: #{e.message}")
         end
+      end
+
+      # Records the session as attached on this connection, unless a detach
+      # the dropped connection ended forgot it meanwhile: then the caller was
+      # told it is gone, so it is detached again.
+      def settle_session(id)
+        ended = @state_mutex.synchronize do
+          next true if @ending_sessions.delete?(id)
+
+          @session_generations[id] = @generation
+          false
+        end
+        end_again(Protocol::Methods::DETACH, [], id) if ended
       end
 
       def restore_session(id, state)
@@ -92,20 +117,92 @@ module SurrealDB
       end
 
       # The handler is read once the fresh id is in place: one registered
-      # meanwhile went under the old id, whose handler is dropped.
+      # meanwhile went under the old id, whose handler is dropped. A live
+      # query killed meanwhile is killed again (see #kill_lost).
       def restore_live_queries
         lives = @state_mutex.synchronize { @lives.map { |key, live| [key, live.dup] } }
         lives.each do |key, live|
           fresh = @inner.send_request(Protocol::Methods::LIVE, live[:params], session: live[:session])
-          handler = @state_mutex.synchronize do
-            @lives[key][:current] = fresh if @lives.key?(key)
-            @lives.dig(key, :handler)
+          killed, handler = @state_mutex.synchronize do
+            next [true] unless @lives.key?(key)
+
+            @lives[key].merge!(current: fresh, generation: @generation)
+            [false, @lives[key][:handler]]
           end
           @inner.remove_notification_handler(live[:current].to_s)
+          next end_again(Protocol::Methods::KILL, [fresh], live[:session]) if killed
+
           @inner.on_notification(fresh.to_s, relabel(key, handler)) if handler
         rescue ServerError => e
           log(:error, "Could not restore live query #{key}: #{e.message}")
         end
+      end
+
+      # A response can arrive just before the connection drops, and the
+      # thread that asked for it records its effect (a `use`, a new live
+      # query) after that. A restore waits for such requests, so it brings
+      # back the state they changed. Requests still waiting for a response
+      # fail with the old connection; those made on the new one meanwhile
+      # are waited for only up to DELIVERY_WAIT.
+      def await_deliveries
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DELIVERY_WAIT
+        @state_mutex.synchronize do
+          while @delivering.positive? && (left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)).positive?
+            @delivered.wait(@state_mutex, left)
+          end
+        end
+      end
+
+      # Live queries and attached sessions end with the connection, so a
+      # kill or detach the connection dropped under has done its job.
+      def ends_with_connection?(method, session)
+        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
+      end
+
+      # A reconnect another thread made after the drop may have restored the
+      # live query or session before this request forgot it; it is ended
+      # again on the new connection then.
+      def ended_with_connection(method, params, session, since, deadline)
+        again = method == Protocol::Methods::KILL ? kill_lost(params[0], since) : detach_lost(session, since)
+        recover(deadline, method)
+        end_again(method, *again, deadline) if again
+        nil
+      rescue TimeoutError
+        nil # the reconnect carries on in the background
+      end
+
+      # A live query ends with the connection it was started on, so a kill
+      # the connection dropped under has done its job either way, as long as
+      # the reconnect does not start the live query again. Forgetting it is
+      # atomic with a restore's record of it: either the restore has started
+      # it again on a newer connection (and it is killed again here) or the
+      # restore finds it gone and kills what it started itself.
+      # @return [Array, nil] the kill to send again, if it was restored
+      def kill_lost(id, since)
+        live = @state_mutex.synchronize { @lives.delete(id.to_s) }
+        return unless live
+
+        @inner.remove_notification_handler(live[:current].to_s)
+        [[live[:current]], live[:session]] if live[:generation] > since
+      end
+
+      # The same goes for a detach: the session ended with the connection, so
+      # forget it and its live queries rather than restoring them; one a
+      # restore is attaching meanwhile it detaches again itself.
+      def detach_lost(session, since)
+        restored = @state_mutex.synchronize do
+          @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
+          @ending_sessions << session
+          @session_generations.delete(session).to_i > since
+        end
+        forget_session(session)
+        [[], session] if restored
+      end
+
+      def end_again(method, params, session, deadline = nil)
+        @inner.send_request(method, params, session: session, **time_left(deadline, method))
+      rescue Error => e
+        log(:warn, "Could not #{method} on the new connection what the dropped one ended: #{e.message}")
       end
     end
   end

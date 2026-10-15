@@ -28,10 +28,6 @@ module SurrealDB
 
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
-      # How long a restore waits for requests whose response already arrived
-      # to record it (see #await_deliveries).
-      DELIVERY_WAIT = 1.0
-
       # @return [Integer] max reconnection attempts before giving up
       attr_reader :max_retries
 
@@ -51,8 +47,14 @@ module SurrealDB
         @opened = false
         @restoring = false
         # Live queries started with `live`, by the id the caller was given:
-        # { params:, session:, current: id on the current connection, handler: }
+        # { params:, session:, current: id on the current connection,
+        #   generation: of that connection, handler: }
         @lives = {}
+        # Attached sessions, by the generation of the connection a reconnect
+        # last attached them on; and those a lost detach ended meanwhile.
+        @session_generations = {}
+        @ending_sessions = Set.new
+        @recovery = nil
         # Transactions, by id: [connection generation they began on, session].
         @generation = 0
         @transactions = {}
@@ -232,26 +234,13 @@ module SurrealDB
         @state_mutex.synchronize { @delivered.broadcast if (@delivering -= 1).zero? }
       end
 
-      # A response can arrive just before the connection drops, and the
-      # thread that asked for it records its effect (a `use`, a new live
-      # query) after that. A restore waits for such requests, so it brings
-      # back the state they changed. Requests still waiting for a response
-      # fail with the old connection; those made on the new one meanwhile
-      # are waited for only up to DELIVERY_WAIT.
-      def await_deliveries
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DELIVERY_WAIT
-        @state_mutex.synchronize do
-          while @delivering.positive? && (left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)).positive?
-            @delivered.wait(@state_mutex, left)
-          end
-        end
-      end
-
       def track_live(method, params, session, result)
         track_transaction(method, params, session, result)
         case method
         when Protocol::Methods::LIVE
-          @state_mutex.synchronize { @lives[result.to_s] = { params: params, session: session, current: result } }
+          @state_mutex.synchronize do
+            @lives[result.to_s] = { params: params, session: session, current: result, generation: @generation }
+          end
         when Protocol::Methods::KILL
           id = params[0].to_s
           @state_mutex.synchronize { @lives.delete_if { |_, live| live[:current].to_s == id } }
@@ -269,57 +258,15 @@ module SurrealDB
         end
       end
 
-      # Live queries and attached sessions end with the connection, so a
-      # kill or detach the connection dropped under has done its job.
-      def ends_with_connection?(method, session)
-        method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
-      end
-
-      # A reconnect another thread made after the drop may have restored the
-      # live query or session before this request forgot it; it is ended
-      # again on the new connection then.
-      def ended_with_connection(method, params, session, since, deadline)
-        restored = @generation > since
-        gone = method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
-        recover(deadline, method)
-        end_again(method, *gone) if gone && restored
-        nil
-      rescue TimeoutError
-        nil # the reconnect carries on in the background
-      end
-
-      # A live query ends with the connection it was started on, so a kill
-      # the connection dropped under has done its job either way, as long as
-      # the reconnect does not start the live query again.
-      # @return [Array, nil] the kill to send again, if it was restored
-      def kill_lost(id)
-        live = @state_mutex.synchronize { @lives.delete(id.to_s) }
-        return unless live
-
-        @inner.remove_notification_handler(live[:current].to_s)
-        [[live[:current]], live[:session]]
-      end
-
-      # The same goes for a detach: the session ended with the connection, so
-      # forget it and its live queries rather than restoring them.
-      def detach_lost(session)
-        @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
-        forget_session(session)
-        [[], session]
-      end
-
-      def end_again(method, params, session)
-        @inner.send_request(method, params, session: session)
-      rescue Error => e
-        log(:warn, "Could not #{method} on the new connection what the dropped one ended: #{e.message}")
-      end
-
       # The server ended the session's live queries (reset, detach); drop them and
       # their handlers, which would otherwise never run again but stay
       # reachable, and would be restored into a session that no longer exists.
       # A reset or a detach ends the session's live queries and transactions.
       def forget_session(session)
-        @state_mutex.synchronize { @transactions.delete_if { |_, (_, owner)| owner == session } }
+        @state_mutex.synchronize do
+          @transactions.delete_if { |_, (_, owner)| owner == session }
+          @session_generations.delete(session)
+        end
         forget_lives(session)
       end
 
@@ -408,12 +355,21 @@ module SurrealDB
       def recover(deadline, request)
         return ensure_connected! if deadline.nil?
 
-        worker = Thread.new { ensure_connected! }
-        worker.report_on_exception = false
+        worker = recovery
         left = deadline - monotonic_now
-        return if worker.join(left.clamp(0, nil))
+        # Thread#value raises what the reconnect failed with.
+        return worker.value if worker.join(left.clamp(0, nil))
 
         raise TimeoutError.new("'#{request}' timed out waiting for the connection to come back", sent: false)
+      end
+
+      # One reconnect in the background at a time, shared by every request
+      # that waits for it with a deadline.
+      def recovery
+        @state_mutex.synchronize do
+          @recovery = nil unless @recovery&.alive?
+          @recovery ||= Thread.new { ensure_connected! }.tap { |worker| worker.report_on_exception = false }
+        end
       end
 
       # @raise [ConnectionError] if all attempts fail

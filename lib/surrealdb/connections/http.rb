@@ -219,22 +219,24 @@ module SurrealDB
       def open_socket
         return if @http.started?
 
+        within_deadline(:open_timeout)
         start_http
-        read_within_deadline
+        within_deadline(:read_timeout, :write_timeout)
       rescue Net::OpenTimeout => e
         raise TimeoutError.new("HTTP connect timed out: #{e.message}", sent: false)
       rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
         raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
       end
 
-      def read_within_deadline
+      # Gives each phase of a call (opening a socket, again after a stale
+      # one; writing; reading) only the time its deadline has left.
+      def within_deadline(*timeouts)
         return unless @call_deadline
 
         left = @call_deadline - monotonic_now
         raise TimeoutError.new('HTTP request timed out while connecting', sent: false) unless left.positive?
 
-        @http.read_timeout = left
-        @http.write_timeout = left
+        timeouts.each { |timeout| @http.public_send(:"#{timeout}=", left) }
       end
 
       def start_http
