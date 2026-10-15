@@ -29,7 +29,7 @@ module SurrealDB
     def initialize(table, id)
       raise ArgumentError, 'table must be a non-empty string' if table.nil? || table.to_s.empty?
 
-      @table = table.to_s.freeze
+      @table = -table.to_s
       @id = id
     end
 
@@ -200,7 +200,7 @@ module SurrealDB
     def initialize(value)
       raise ArgumentError, 'record ID string must be non-empty' if value.nil? || value.to_s.empty?
 
-      @value = value.to_s.freeze
+      @value = -value.to_s
     end
 
     def to_s

@@ -28,6 +28,10 @@ module SurrealDB
 
       TXN_FINISH = [Protocol::Methods::COMMIT, Protocol::Methods::CANCEL].freeze
 
+      # How long a restore waits for requests whose response already arrived
+      # to record it (see #await_deliveries).
+      DELIVERY_WAIT = 1.0
+
       # @return [Integer] max reconnection attempts before giving up
       attr_reader :max_retries
 
@@ -56,6 +60,9 @@ module SurrealDB
         # that lost them.
         @auth_lost = {}
         @on_reconnect = nil
+        # Requests between sending and recording their result.
+        @delivering = 0
+        @delivered = ConditionVariable.new
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
@@ -188,7 +195,7 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
-        return ended_with_connection(method, params, session, deadline) if ends_with_connection?(method, session)
+        return ended_with_connection(method, params, session, since, deadline) if ends_with_connection?(method, session)
 
         recover(deadline, method)
         raise_interrupted(method, e) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
@@ -220,10 +227,28 @@ module SurrealDB
       # Sends one request, translating live query ids the caller holds into
       # the ids they have on the current connection.
       def attempt(method, params, session, txn, deadline)
+        @state_mutex.synchronize { @delivering += 1 }
         params = [current_live_id(params[0])] + params.drop(1) if method == Protocol::Methods::KILL
         result = @inner.send_request(method, params, session: session, txn: txn, **time_left(deadline, method))
         track_live(method, params, session, result)
         result
+      ensure
+        @state_mutex.synchronize { @delivered.broadcast if (@delivering -= 1).zero? }
+      end
+
+      # A response can arrive just before the connection drops, and the
+      # thread that asked for it records its effect (a `use`, a new live
+      # query) after that. A restore waits for such requests, so it brings
+      # back the state they changed. Requests still waiting for a response
+      # fail with the old connection; those made on the new one meanwhile
+      # are waited for only up to DELIVERY_WAIT.
+      def await_deliveries
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DELIVERY_WAIT
+        @state_mutex.synchronize do
+          while @delivering.positive? && (left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)).positive?
+            @delivered.wait(@state_mutex, left)
+          end
+        end
       end
 
       def track_live(method, params, session, result)
@@ -254,22 +279,29 @@ module SurrealDB
         method == Protocol::Methods::KILL || (method == Protocol::Methods::DETACH && !session.nil?)
       end
 
-      def ended_with_connection(method, params, session, deadline)
-        method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
-        begin
-          recover(deadline, method)
-        rescue TimeoutError
-          nil # the reconnect carries on in the background
-        end
+      # A reconnect another thread made after the drop may have restored the
+      # live query or session before this request forgot it; it is ended
+      # again on the new connection then.
+      def ended_with_connection(method, params, session, since, deadline)
+        restored = @generation > since
+        gone = method == Protocol::Methods::KILL ? kill_lost(params[0]) : detach_lost(session)
+        recover(deadline, method)
+        end_again(method, *gone) if gone && restored
         nil
+      rescue TimeoutError
+        nil # the reconnect carries on in the background
       end
 
       # A live query ends with the connection it was started on, so a kill
       # the connection dropped under has done its job either way, as long as
       # the reconnect does not start the live query again.
+      # @return [Array, nil] the kill to send again, if it was restored
       def kill_lost(id)
         live = @state_mutex.synchronize { @lives.delete(id.to_s) }
-        @inner.remove_notification_handler(live[:current].to_s) if live
+        return unless live
+
+        @inner.remove_notification_handler(live[:current].to_s)
+        [[live[:current]], live[:session]]
       end
 
       # The same goes for a detach: the session ended with the connection, so
@@ -277,6 +309,13 @@ module SurrealDB
       def detach_lost(session)
         @inner.track_request(Protocol::Methods::DETACH, [], nil, session)
         forget_lives(session)
+        [[], session]
+      end
+
+      def end_again(method, params, session)
+        @inner.send_request(method, params, session: session)
+      rescue Error => e
+        log(:warn, "Could not #{method} on the new connection what the dropped one ended: #{e.message}")
       end
 
       # The server ended the session's live queries (reset, detach); drop them and
@@ -341,6 +380,8 @@ module SurrealDB
           return if @inner.connected?
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
+          # Requests wait (see #await_restore) until the new connection is
+          # checked and restored, not only while it is being restored.
           @restoring = true
           begin
             reconnect!
@@ -351,25 +392,6 @@ module SurrealDB
           end
           log(:info, 'Reconnected')
         end
-      end
-
-      # Brings the state the server lost back on the new connection. Its
-      # transactions are gone, so they belong to the previous generation.
-      def restore_state
-        @restoring = true
-        @generation += 1
-        restore_sessions
-        restore_live_queries
-      ensure
-        @restoring = false
-      end
-
-      def check_new_connection
-        @on_reconnect&.call(@inner)
-      rescue StandardError
-        @inner.close
-        @connected = false
-        raise
       end
 
       # A request made while a reconnect is restoring sessions would reach a

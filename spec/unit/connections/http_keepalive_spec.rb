@@ -22,6 +22,47 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  context 'when a kept-alive TLS socket ends without close_notify' do
+    let(:tls_eof) { OpenSSL::SSL::SSLError.new('SSL_read: unexpected eof while reading') }
+
+    def fail_second_request(http)
+      net = http.instance_variable_get(:@http)
+      calls = 0
+      allow(net).to receive(:request).and_wrap_original do |original, *args|
+        calls += 1
+        raise tls_eof if calls == 2
+
+        original.call(*args)
+      end
+    end
+
+    it 'retries a repeatable request on a fresh socket, as for any stale socket' do
+      server = ScriptedHTTPServer.new(%i[ok ok])
+      http = http_to(server)
+      fail_second_request(http)
+      Timeout.timeout(5) do
+        http.send_request('ping')
+        expect(http.send_request('select', [SurrealDB::Table.new('person')])).to eq('pong')
+      end
+    ensure
+      http&.close
+      server&.close
+    end
+
+    it 'reports a request that may have run as interrupted' do
+      server = ScriptedHTTPServer.new(%i[ok])
+      http = http_to(server)
+      fail_second_request(http)
+      Timeout.timeout(5) do
+        http.send_request('ping')
+        expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::RequestInterruptedError)
+      end
+    ensure
+      http&.close
+      server&.close
+    end
+  end
+
   it 'leaves reconnecting to the next request, so a failed one does not also wait for a new socket' do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
