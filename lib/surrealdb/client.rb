@@ -40,6 +40,8 @@ module SurrealDB
       @version_check = options.fetch(:version_check, true)
       @server_version = nil
       @connection = build_connection(url, **options)
+      # A reconnect may reach another server (a rolling upgrade, a failover).
+      @connection.on_reconnect { |fresh| check_server_version(fresh) } if @connection.respond_to?(:on_reconnect)
     end
 
     # Opens the connection to SurrealDB and checks the server's version.
@@ -183,10 +185,10 @@ module SurrealDB
 
     private
 
-    # Requests made directly on the client run in the connection's default
-    # session.
-    def check_server_version
-      @server_version = @connection.send_request(Protocol::Methods::VERSION).to_s
+    # Asks the server for its version, on the given connection (a reconnect
+    # checks the new one before anything is restored on it).
+    def check_server_version(connection = @connection)
+      @server_version = connection.send_request(Protocol::Methods::VERSION).to_s
       ServerVersion.check!(@server_version) if @version_check
     end
 
@@ -196,6 +198,8 @@ module SurrealDB
       SurrealDB.configuration.logger&.debug("Closing after a failed connect also failed: #{e.message}")
     end
 
+    # Requests made directly on the client run in the connection's default
+    # session.
     def rpc(method, params = [])
       @connection.send_request(method, params)
     end

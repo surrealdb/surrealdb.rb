@@ -55,6 +55,7 @@ module SurrealDB
         # Sessions whose credentials could not be restored, by the generation
         # that lost them.
         @auth_lost = {}
+        @on_reconnect = nil
         @inner.on_disconnect { |reason| reconnect_in_background(reason) } if @inner.respond_to?(:on_disconnect)
       end
 
@@ -68,8 +69,20 @@ module SurrealDB
           reopened = @opened
           @opened = true
           @connected = true
-          restore_state if reopened
+          if reopened
+            check_new_connection
+            restore_state
+          end
         end
+      end
+
+      # Registers a check run on each new connection before anything is
+      # restored on it, such as the client's server version check. When it
+      # raises, the connection is closed again and the error reaches the
+      # request that was waiting for the reconnect.
+      # @yield [WebSocket] the new connection, to send the check on
+      def on_reconnect(&block)
+        @on_reconnect = block
       end
 
       def close
@@ -313,7 +326,7 @@ module SurrealDB
 
         log(:warn, "WebSocket connection lost (#{reason}); reconnecting")
         ensure_connected!
-      rescue ConnectionError => e
+      rescue Error => e
         log(@closed ? :debug : :error, "Reconnection failed: #{e.message}")
       end
 
@@ -325,6 +338,7 @@ module SurrealDB
           raise NotConnectedError, 'not connected' if @closed || !@opened
 
           reconnect!
+          check_new_connection
           restore_state
           log(:info, 'Reconnected')
         end
@@ -339,6 +353,14 @@ module SurrealDB
         restore_live_queries
       ensure
         @restoring = false
+      end
+
+      def check_new_connection
+        @on_reconnect&.call(@inner)
+      rescue StandardError
+        @inner.close
+        @connected = false
+        raise
       end
 
       # A request made while a reconnect is restoring sessions would reach a

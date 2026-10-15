@@ -388,6 +388,29 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     end
   end
 
+  describe '#on_reconnect' do
+    it 'checks each new connection before restoring anything on it' do
+      reliable.send_request('use', %w[ns db])
+      checked = []
+      reliable.on_reconnect { |connection| checked << connection.send_request('version') }
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      reliable.send_request('select', ['person'])
+      expect(checked).to eq(['ok'])
+      expect(methods_sent).to eq(%w[select version use select])
+    end
+
+    it 'closes a connection that fails the check and restores nothing on it' do
+      reliable.send_request('use', %w[ns db])
+      reliable.on_reconnect { raise SurrealDB::UnsupportedVersionError.new('surrealdb-5.0.0', '3.0.0', '5.0.0') }
+      inner.calls.clear
+      inner.fail_next(SurrealDB::NotConnectedError.new('not connected'))
+      expect { reliable.send_request('select', ['person']) }.to raise_error(SurrealDB::UnsupportedVersionError)
+      expect(methods_sent).to eq(%w[select])
+      expect(inner).not_to be_connected
+    end
+  end
+
   describe '#connect after #close' do
     it 'restores the sessions and live queries the client still holds' do
       session = SurrealDB::Uuid.v4
