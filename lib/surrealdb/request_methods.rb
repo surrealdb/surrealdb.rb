@@ -19,18 +19,27 @@ module SurrealDB
     #
     # Either can be left as it is or cleared: a String selects it, `nil`
     # clears it, and {SurrealDB::NONE} (the default) leaves it unchanged.
+    # A database needs a namespace, so clearing the namespace clears the
+    # database too.
     #
     # @example
     #   db.use("app", "prod")       # both
     #   db.use("app")               # namespace only; the database is unchanged
     #   db.use(database: "staging") # database only
     #   db.use(database: nil)       # clear the database
+    #   db.use(namespace: nil)      # clear both
     # @param ns [String, nil, None] namespace
     # @param db [String, nil, None] database
     # @param namespace [String, nil, None] namespace, as a keyword
     # @param database [String, nil, None] database, as a keyword
     # @return [Hash{String => String, nil}] the resulting "namespace" and "database"
+    # @raise [ArgumentError] when clearing the namespace but selecting a database
     def use(ns = NONE, db = NONE, namespace: ns, database: db)
+      if namespace.nil?
+        raise ArgumentError, 'cannot select a database without a namespace' if database.is_a?(String)
+
+        database = nil
+      end
       result = rpc(Protocol::Methods::USE, [namespace, database])
       state = request_state
       { 'namespace' => state&.namespace, 'database' => state&.database }.tap do |current|

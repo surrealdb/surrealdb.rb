@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require 'base64'
+require 'json'
+
 module SurrealDB
   module Connections
     # What the client has told one server session: its namespace and database,
@@ -44,10 +47,10 @@ module SurrealDB
         when Protocol::Methods::USE then track_use(params, result)
         when Protocol::Methods::SIGNIN
           @signin = [method, snapshot(params)]
-          store_tokens(result)
+          signed_in(params[0], result)
         when Protocol::Methods::SIGNUP
           @signin = nil # a new identity; the previous credentials are not its own
-          store_tokens(result)
+          signed_in(params[0], result)
         when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
         when Protocol::Methods::RESET then reset
@@ -59,6 +62,20 @@ module SurrealDB
       # @return [Boolean] whether the session holds credentials
       def authenticated?
         !@access_token.nil?
+      end
+
+      # The claims of a JWT, decoded but not verified: the SDK only reads
+      # them to follow what the server does with the token.
+      # @param token [String, nil]
+      # @return [Hash, nil] nil for a token that is not a JWT
+      def self.token_claims(token)
+        payload = token.to_s.split('.')[1]
+        return nil unless payload
+
+        claims = JSON.parse(Base64.urlsafe_decode64(payload + ('=' * (-payload.length % 4))))
+        claims.is_a?(Hash) ? claims : nil
+      rescue ArgumentError, JSON::ParserError
+        nil
       end
 
       # An independent copy, for forking a session.
@@ -126,6 +143,21 @@ module SurrealDB
         value
       end
 
+      # Signing in or up at namespace or database level also selects that
+      # namespace (and database) on the server, as `use` would; the rest of
+      # the selection is left as it was.
+      def signed_in(credentials, result)
+        store_tokens(result)
+        select_scope(credentials.is_a?(Hash) ? credentials.transform_keys(&:to_s) : {})
+      end
+
+      def select_scope(source)
+        namespace = source['NS'] || source['ns']
+        database = source['DB'] || source['db']
+        @namespace = namespace if namespace.is_a?(String)
+        @database = database if database.is_a?(String)
+      end
+
       def store_tokens(result)
         case result
         when String
@@ -145,6 +177,7 @@ module SurrealDB
 
         store_tokens(token)
         @signin = nil
+        select_scope(self.class.token_claims(token) || {})
       end
     end
   end

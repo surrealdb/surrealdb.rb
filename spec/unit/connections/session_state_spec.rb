@@ -41,4 +41,24 @@ RSpec.describe SurrealDB::Connections::SessionState do
     value.first << 'x'
     expect(state.variables['v'].to_a).to eq([['a'], ['b']])
   end
+
+  it 'selects the namespace and database a scoped sign-in or sign-up selects on the server' do
+    state = described_class.new
+    state.track('use', %w[old olddb], nil)
+    state.track('signin', [{ 'NS' => 'app', 'user' => 'u', 'pass' => 'p' }], 'token')
+    expect([state.namespace, state.database]).to eq(%w[app olddb])
+    state.track('signup', [{ 'ns' => 'shop', 'db' => 'prod', 'ac' => 'user' }], 'token2')
+    expect([state.namespace, state.database]).to eq(%w[shop prod])
+    state.track('signin', [{ 'user' => 'root', 'pass' => 'root' }], 'token3') # root: no scope
+    expect([state.namespace, state.database]).to eq(%w[shop prod])
+  end
+
+  it 'selects the namespace and database named in a token it authenticates with' do
+    payload = Base64.urlsafe_encode64(JSON.generate('NS' => 'app', 'DB' => 'prod'), padding: false)
+    state = described_class.new
+    state.track('authenticate', ["e30.#{payload}.sig"], nil)
+    expect([state.namespace, state.database]).to eq(%w[app prod])
+    state.track('authenticate', ['not-a-jwt'], nil)
+    expect([state.namespace, state.database]).to eq(%w[app prod])
+  end
 end

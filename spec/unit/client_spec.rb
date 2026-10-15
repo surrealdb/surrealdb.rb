@@ -337,6 +337,44 @@ RSpec.describe SurrealDB::Client, '#healthy?' do
     expect(client.healthy?).to be(false)
     expect { client.health }.to raise_error(SurrealDB::ConnectionError)
   end
+
+  it 'is false when something other than an HTTP server answers' do
+    server = TCPServer.new('127.0.0.1', 0)
+    answering = Thread.new do
+      loop do
+        socket = server.accept
+        socket.readpartial(4096)
+        socket.write("SSH-2.0-OpenSSH_9.6\r\n\r\n")
+        socket.close
+      end
+    rescue IOError, SystemCallError
+      nil
+    end
+    client = described_class.new("http://127.0.0.1:#{server.addr[1]}", timeout: 2)
+    expect(client.healthy?).to be(false)
+    expect { client.health }.to raise_error(SurrealDB::ProtocolError, /malformed/)
+    client.connect
+    expect { client.version }.to raise_error(SurrealDB::ProtocolError, /malformed/)
+  ensure
+    server&.close
+    answering&.kill
+  end
+end
+
+RSpec.describe SurrealDB::Client, '#use' do
+  let(:client) { described_class.new('http://localhost:8000') }
+
+  before { allow(client.connection).to receive(:send_request).and_return(nil) }
+
+  it 'clears the database with the namespace, which the server requires' do
+    client.use(namespace: nil)
+    expect(client.connection).to have_received(:send_request).with('use', [nil, nil])
+  end
+
+  it 'refuses a database without a namespace' do
+    expect { client.use(nil, 'prod') }.to raise_error(ArgumentError, /without a namespace/)
+    expect(client.connection).not_to have_received(:send_request)
+  end
 end
 
 RSpec.describe SurrealDB::Client, '#import' do
