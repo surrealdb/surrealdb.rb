@@ -10,7 +10,8 @@ module SurrealDB
   # record ids and `type::is_uuid` checks survive a round trip: a plain
   # String would be stored as a string.
   class Uuid
-    PATTERN = /\A\h{8}-?\h{4}-?\h{4}-?\h{4}-?\h{12}\z/
+    # Canonical (8-4-4-4-12) or compact (32 hex digits), nothing in between.
+    PATTERN = /\A(?:\h{8}-\h{4}-\h{4}-\h{4}-\h{12}|\h{32})\z/
 
     # @return [String] the 16 raw bytes (binary encoding)
     attr_reader :bytes
