@@ -36,6 +36,20 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(call_count).to eq(2)
     end
 
+    it 'does not send a transaction request, or its commit, again on the new connection' do
+      txn = SurrealDB::Uuid.v4
+      [['query', ['UPDATE x'], { txn: txn }], ['commit', [txn], {}]].each do |method, params, options|
+        calls = 0
+        allow(inner).to receive(:send_request) do |sent, *|
+          calls += 1 if sent == method
+          raise SurrealDB::ConnectionError, 'disconnected'
+        end
+        expect { reliable.send_request(method, params, **options) }
+          .to raise_error(SurrealDB::ConnectionError, /transaction ended with the connection/)
+        expect(calls).to eq(1)
+      end
+    end
+
     it 'raises after exhausting retries' do
       allow(inner).to receive(:send_request).and_raise(SurrealDB::ConnectionError, 'disconnected')
       allow(inner).to receive(:close)
