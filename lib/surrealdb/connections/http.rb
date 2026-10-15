@@ -68,12 +68,10 @@ module SurrealDB
         # Without an attached session every HTTP request runs in a fresh server
         # session, so a variable set with `let` would be gone by the next
         # request. Keep variables on the client (Base#track_request records
-        # them) and send them with each query instead.
-        if session.nil?
-          return nil if [Protocol::Methods::LET, 'set', Protocol::Methods::UNSET].include?(method)
-
-          params = with_variables(method, params)
-        end
+        # them) and send them with each query instead. `let` and `unset` are
+        # still sent, so the server refuses what it would refuse over
+        # WebSocket (a protected name such as `auth`) before it is recorded.
+        params = with_variables(method, params) if session.nil?
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 

@@ -45,6 +45,13 @@ RSpec.describe SurrealDB::RecordID do
       expect(described_class.parse("\u27E8my table\u27E9:x")).to eq(described_class.new('my table', 'x'))
     end
 
+    it 'parses signed numeric ids as integers' do
+      expect(described_class.parse('post:-1').id).to eq(-1)
+      expect(described_class.parse('post:+7').id).to eq(7)
+      expect(described_class.parse(described_class.new('post', -42).to_s)).to eq(described_class.new('post', -42))
+      expect(described_class.parse(described_class.new('post', '-42').to_s).id).to eq('-42')
+    end
+
     it 'keeps ids with letters after digits as strings' do
       expect(described_class.parse('knows:2wl3iofcyqmg6in96bga').id).to eq('2wl3iofcyqmg6in96bga')
     end
