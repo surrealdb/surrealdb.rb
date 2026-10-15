@@ -8,7 +8,7 @@ module SurrealDB
     # HTTP transport for SurrealDB RPC.
     #
     # Each request is a synchronous POST to /rpc with a CBOR body.
-    # Does not support live queries, sessions, or transactions.
+    # Does not support live queries, listing sessions, or transactions.
     #
     # ## Thread Safety
     #
@@ -56,6 +56,12 @@ module SurrealDB
         false
       end
 
+      # The server refuses `sessions` over HTTP.
+      # @return [Boolean]
+      def supports_session_listing?
+        false
+      end
+
       protected
 
       # Methods that take query variables as their second param.
@@ -86,7 +92,9 @@ module SurrealDB
 
         request = build_request(encoded, session_state(session) || session_state,
                                 bearer: !CREDENTIAL_METHODS.include?(method))
-        response = with_read_timeout(timeout) { execute_request(request) }
+        response = with_read_timeout(timeout) do
+          execute_request(request, repeatable: txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method))
+        end
 
         decoded = @rpc.decode_response(response.body)
         Protocol::Response.extract_result(decoded)
@@ -120,14 +128,6 @@ module SurrealDB
         req
       end
 
-      # Sends the request on the kept-alive connection.
-      #
-      # If that socket turns out to be dead (the server closed it while idle,
-      # racing our request), the request is sent once more on a new socket.
-      # This is safe for every method, not just idempotent ones: it only
-      # happens on a socket that already served a request, and the error
-      # arrives before any response byte, which is the case where the server
-      # dropped the request unread. Go's net/http retries the same case.
       def with_read_timeout(timeout)
         return yield if timeout.nil?
 
@@ -139,14 +139,23 @@ module SurrealDB
         end
       end
 
-      def execute_request(request)
-        response = transport(request)
+      # Sends the request on the kept-alive connection.
+      #
+      # If that socket turns out to be dead (the server closed it while idle,
+      # racing our request), a request that is safe to repeat is sent once
+      # more on a new socket. Anything else raises RequestInterruptedError:
+      # a reset before the response does not prove the server never ran it.
+      # (Net::HTTP already reopens sockets that sat idle past
+      # keep_alive_timeout or that the server has visibly closed, so this race
+      # is narrow.)
+      def execute_request(request, repeatable:)
+        response = transport(request, repeatable: repeatable)
         HTTPEndpoint.raise_for(response, 'request') unless response.is_a?(Net::HTTPSuccess)
 
         response
       end
 
-      def transport(request, retried: false)
+      def transport(request, repeatable:, retried: false)
         start_http unless @http.started?
         reused = @requests_on_socket.positive?
         response = @http.request(request)
@@ -154,11 +163,15 @@ module SurrealDB
         response
       rescue *STALE_CONNECTION_ERRORS => e
         restart_http
-        if reused && !retried
-          log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
-          return transport(request, retried: true)
+        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
+        unless repeatable
+          raise RequestInterruptedError,
+                "HTTP keep-alive socket failed while the request was in flight (#{e.class}); " \
+                'it was not sent again because it may already have run'
         end
-        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+
+        log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
+        transport(request, repeatable: true, retried: true)
       rescue Net::OpenTimeout, Net::ReadTimeout => e
         restart_http
         raise TimeoutError, "HTTP request timed out: #{e.message}"

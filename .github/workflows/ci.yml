@@ -40,9 +40,10 @@ jobs:
       fail-fast: false
       matrix:
         ruby: ["3.3"]
-        # v3.0.4 is the oldest supported server; v3 is the latest 3.x release;
-        # nightly is the 4.0 development line.
-        surrealdb: ["v3.0.4", "v3", "nightly"]
+        # v3.0.4 is the oldest supported server; latest-3.x resolves to the
+        # highest stable v3.x.y tag; nightly is built from main, the newest
+        # server there is (no 4.0 image is published yet).
+        surrealdb: ["v3.0.4", "latest-3.x", "nightly"]
         transport: [websocket, http]
     env:
       SURREALDB_WS_URL: ws://localhost:8000
@@ -56,11 +57,25 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
+      # The mutable v3 tag follows the most recent publication, which can be
+      # a patch to an older minor, so pick the highest version explicitly.
+      - name: Resolve image tag
+        id: image
+        run: |
+          tag="${{ matrix.surrealdb }}"
+          if [ "$tag" = "latest-3.x" ]; then
+            tag=$(curl -sf "https://hub.docker.com/v2/repositories/surrealdb/surrealdb/tags?page_size=100&name=v3." \
+              | jq -r '.results[].name' | grep -E '^v3\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          fi
+          test -n "$tag"
+          echo "Using surrealdb/surrealdb:$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Start SurrealDB
         run: |
-          docker pull surrealdb/surrealdb:${{ matrix.surrealdb }}
+          docker pull surrealdb/surrealdb:${{ steps.image.outputs.tag }}
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:${{ matrix.surrealdb }} \
+            surrealdb/surrealdb:${{ steps.image.outputs.tag }} \
             start --user root --pass root --allow-all
 
       - name: Wait for SurrealDB
@@ -77,10 +92,15 @@ jobs:
           exit 1
 
       - name: Server version
-        run: docker exec surrealdb /surreal version || docker run --rm surrealdb/surrealdb:${{ matrix.surrealdb }} version
+        run: docker exec surrealdb /surreal version || docker run --rm surrealdb/surrealdb:${{ steps.image.outputs.tag }} version
 
       - name: Run integration tests (${{ matrix.transport }})
         run: bundle exec rspec spec/integration/${{ matrix.transport }}
+
+      # The README examples use both transports, so they run once per server.
+      - name: Run README examples
+        if: matrix.transport == 'websocket'
+        run: bundle exec rspec spec/integration/readme_spec.rb
 
       - name: Stop SurrealDB
         if: always()

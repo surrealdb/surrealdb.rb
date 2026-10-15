@@ -150,16 +150,37 @@ module SurrealDB
 
       def open_socket(uri, deadline)
         port = uri.port || default_port(uri.scheme)
-        tcp = begin
-          Socket.tcp(uri.host, port, connect_timeout: remaining(deadline, 'TCP connect'))
-        rescue Errno::ETIMEDOUT, IO::TimeoutError
-          raise ConnectionError, "TCP connect to #{uri.host}:#{port} timed out after #{@connect_timeout}s"
-        rescue SystemCallError, SocketError => e
-          raise ConnectionError, "cannot connect to #{uri.host}:#{port}: #{e.message}"
-        end
+        tcp = tcp_connect(uri.host, port, deadline)
         return tcp unless uri.scheme == 'wss'
 
         tls_connect(tcp, uri.host, deadline)
+      end
+
+      # Resolves the host, then tries its addresses in turn, all within the
+      # one deadline. (Socket.tcp gives each address its own connect_timeout
+      # and does not bound the lookup on every platform.)
+      def tcp_connect(host, port, deadline)
+        error = nil
+        resolve(host, port, deadline).each do |addr|
+          return addr.connect(timeout: remaining(deadline, 'TCP connect'))
+        rescue Errno::ETIMEDOUT, IO::TimeoutError
+          raise ConnectionError, "TCP connect to #{host}:#{port} timed out after #{@connect_timeout}s"
+        rescue SystemCallError => e
+          error = e
+        end
+        raise ConnectionError, "cannot connect to #{host}:#{port}: #{error&.message || 'no addresses'}"
+      end
+
+      # getaddrinfo cannot be interrupted, so the lookup runs in a thread
+      # that is left to finish on its own if the deadline passes first.
+      def resolve(host, port, deadline)
+        lookup = Thread.new { Addrinfo.getaddrinfo(host, port, nil, :STREAM) }
+        lookup.report_on_exception = false
+        return lookup.value if lookup.join(remaining(deadline, 'DNS lookup'))
+
+        raise ConnectionError, "DNS lookup of #{host} timed out after #{@connect_timeout}s"
+      rescue SocketError => e
+        raise ConnectionError, "cannot connect to #{host}:#{port}: #{e.message}"
       end
 
       def tls_connect(tcp, host, deadline)

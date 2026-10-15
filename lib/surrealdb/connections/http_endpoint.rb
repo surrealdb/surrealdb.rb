@@ -10,7 +10,7 @@ module SurrealDB
     # which have no RPC method. Works for any remote connection: a ws:// URL
     # is turned into the matching http:// one.
     class HTTPEndpoint
-      # @return [URI::HTTP] base URL, without the trailing /rpc
+      # @return [URI::HTTP, URI::HTTPS] base URL, without the trailing /rpc
       attr_reader :base
 
       # @param url [String] the connection URL (ws://, wss://, http://, https://)
@@ -19,9 +19,10 @@ module SurrealDB
         uri = URI.parse(url)
         scheme = { 'ws' => 'http', 'wss' => 'https' }.fetch(uri.scheme, uri.scheme)
         path = uri.path.to_s.sub(%r{/rpc/?\z}, '').chomp('/')
-        default_port = scheme == 'https' ? 443 : 80
-        port = uri.port == default_port ? nil : uri.port
-        @base = URI::Generic.build(scheme: scheme, host: uri.host, port: port, path: path)
+        # URI::HTTP(S) fill in the scheme's default port when the URL has none
+        # and leave it out of #to_s.
+        klass = scheme == 'https' ? URI::HTTPS : URI::HTTP
+        @base = klass.build(host: uri.host, port: uri.port, path: path)
         @timeout = timeout
       end
 
