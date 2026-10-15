@@ -35,41 +35,22 @@ module SurrealDB
       end
 
       # Maps a CBOR tag number + value to the appropriate SurrealDB type.
-      def resolve_tag(tag, value) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/MethodLength
+      def resolve_tag(tag, value) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity
         case tag
-        when Tags::NONE
-          SurrealDB::NONE
-        when Tags::TABLE
-          SurrealDB::Table.new(value)
-        when Tags::RECORD_ID
-          # The string form ("table:id") is the one StringRecordID sends.
-          if value.is_a?(String)
-            SurrealDB::StringRecordID.new(value)
-          else
-            SurrealDB::RecordID.new(value[0], resolve(value[1]))
-          end
-        when Tags::UUID_STRING, Tags::UUID_BINARY
-          resolve_uuid(tag, value)
-        when Tags::DATETIME_STRING
-          Time.iso8601(value).utc
-        when Tags::FILE
-          SurrealDB::FileRef.new(value[0], value[1])
-        when Tags::SET
-          ::Set.new(value.map { |v| resolve(v) })
-        when Tags::DECIMAL_STRING
-          BigDecimal(value)
-        when Tags::DATETIME_COMPACT
-          Time.at(value[0], value[1], :nanosecond).utc
-        when Tags::DURATION_STRING
-          SurrealDB::Duration.parse(value)
-        when Tags::DURATION_COMPACT
-          SurrealDB::Duration.new(value[0], value[1])
-        when Tags::RANGE
-          decode_range(value)
-        when Tags::BOUND_INCLUDED
-          SurrealDB::BoundIncluded.new(resolve(value))
-        when Tags::BOUND_EXCLUDED
-          SurrealDB::BoundExcluded.new(resolve(value))
+        when Tags::NONE                 then SurrealDB::NONE
+        when Tags::TABLE                then SurrealDB::Table.new(value)
+        when Tags::RECORD_ID            then decode_record_id(value)
+        when Tags::UUID_STRING, Tags::UUID_BINARY then resolve_uuid(tag, value)
+        when Tags::DATETIME_STRING      then Time.iso8601(value).utc
+        when Tags::FILE                 then SurrealDB::FileRef.new(value[0], value[1])
+        when Tags::SET                  then ::Set.new(value.map { |v| resolve(v) })
+        when Tags::DECIMAL_STRING       then BigDecimal(value)
+        when Tags::DATETIME_COMPACT     then Time.at(value[0], value[1], :nanosecond).utc
+        when Tags::DURATION_STRING      then SurrealDB::Duration.parse(value)
+        when Tags::DURATION_COMPACT     then SurrealDB::Duration.new(value[0], value[1])
+        when Tags::RANGE                then decode_range(value)
+        when Tags::BOUND_INCLUDED       then SurrealDB::BoundIncluded.new(resolve(value))
+        when Tags::BOUND_EXCLUDED       then SurrealDB::BoundExcluded.new(resolve(value))
         when Tags::GEOMETRY_POINT       then decode_point(value)
         when Tags::GEOMETRY_LINE        then decode_line(value)
         when Tags::GEOMETRY_POLYGON     then decode_polygon(value)
@@ -80,6 +61,13 @@ module SurrealDB
         else
           value
         end
+      end
+
+      # The string form ("table:id") is the one StringRecordID sends.
+      def decode_record_id(value)
+        return SurrealDB::StringRecordID.new(value) if value.is_a?(String)
+
+        SurrealDB::RecordID.new(value[0], resolve(value[1]))
       end
 
       def resolve_uuid(tag, value)
@@ -128,7 +116,7 @@ module SurrealDB
         SurrealDB::GeometryCollection.new(*geometries.map { |g| resolve(g) })
       end
 
-      private_class_method :resolve_tag, :resolve_uuid, :decode_range,
+      private_class_method :resolve_tag, :decode_record_id, :resolve_uuid, :decode_range,
                            :decode_point, :decode_line, :decode_polygon,
                            :decode_multipoint, :decode_multiline,
                            :decode_multipolygon, :decode_collection
