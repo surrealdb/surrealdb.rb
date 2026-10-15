@@ -47,6 +47,10 @@ module SurrealDB
     # @return [void]
     def reset
       rpc(Protocol::Methods::RESET, [])
+      live_query_ids.each { |id| connection.remove_notification_handler(id) }
+      live_query_ids.clear
+      open_transactions.each { |txn| txn.send(:discard) }
+      open_transactions.clear
       nil
     end
 
@@ -147,7 +151,7 @@ module SurrealDB
     # @return [String] live query UUID
     def live(resource, diff: false)
       require_live_queries!
-      rpc(Protocol::Methods::LIVE, [table_param(resource), diff])
+      rpc(Protocol::Methods::LIVE, [table_param(resource), diff]).tap { |id| live_query_ids << id.to_s }
     end
 
     # Subscribes to live query notifications.
@@ -165,6 +169,7 @@ module SurrealDB
     def kill(live_query_id)
       require_live_queries!
       connection.remove_notification_handler(live_query_id.to_s)
+      live_query_ids.delete(live_query_id.to_s)
       rpc(Protocol::Methods::KILL, [live_query_id])
     end
 
@@ -188,6 +193,7 @@ module SurrealDB
       require_transactions!
       id = rpc(Protocol::Methods::BEGIN_TXN)
       txn = Transaction.new(connection, id, session: request_session)
+      open_transactions.keep_if(&:open?) << txn
       return txn unless block_given?
 
       run_transaction(txn) { yield txn }
@@ -281,6 +287,17 @@ module SurrealDB
     end
 
     private
+
+    # Live queries started with {#live} in this session, which {#reset} kills.
+    def live_query_ids
+      @live_query_ids ||= []
+    end
+
+    # Transactions begun in this session that may still be open, which
+    # {#reset} cancels.
+    def open_transactions
+      @open_transactions ||= []
+    end
 
     def present(value)
       value.is_a?(None) ? nil : value
