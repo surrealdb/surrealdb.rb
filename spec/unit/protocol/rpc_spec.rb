@@ -38,6 +38,14 @@ RSpec.describe SurrealDB::Protocol::RPC do
       expect(field.value).to eq(session.bytes)
     end
 
+    it 'carries the transaction id as a uuid in the envelope' do
+      txn = SurrealDB::Uuid.v4
+      _, bytes = rpc.encode_request('query', ['RETURN 1'], txn: txn)
+      decoded = CBOR.decode(bytes)
+      expect(decoded['txn'].value).to eq(txn.bytes)
+      expect(decoded).not_to have_key('session')
+    end
+
     it 'prepares SurrealDB types in params' do
       _, bytes = rpc.encode_request('select', [SurrealDB::Table.new('users')])
       decoded = CBOR.decode(bytes)

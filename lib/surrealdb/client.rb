@@ -133,27 +133,6 @@ module SurrealDB
       @connection.send_request(Protocol::Methods::SESSIONS)
     end
 
-    # Begins a transaction on the current session.
-    # @return [void]
-    def begin_transaction
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::BEGIN_TXN)
-    end
-
-    # Commits the current transaction.
-    # @return [void]
-    def commit
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::COMMIT)
-    end
-
-    # Cancels (rolls back) the current transaction.
-    # @return [void]
-    def cancel
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::CANCEL)
-    end
-
     # --- Generic RPC ---
 
     # Sends an arbitrary RPC method call. Useful as an escape hatch for
@@ -171,6 +150,10 @@ module SurrealDB
     # session.
     def rpc(method, params = [])
       @connection.send_request(method, params)
+    end
+
+    def request_session
+      nil
     end
 
     def restore_state(session, state)
@@ -219,12 +202,6 @@ module SurrealDB
               "unsupported URL scheme: #{uri.scheme}. " \
               'Use ws://, wss://, http://, https://, mem://, surrealkv://, or file://'
       end
-    end
-
-    def require_websocket!(feature)
-      return if @connection.supports_live_queries?
-
-      raise UnsupportedError, "#{feature} require a WebSocket connection (ws:// or wss://)"
     end
 
     def require_embedded!

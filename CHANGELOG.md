@@ -14,8 +14,15 @@
 - Sessions were unusable: `attach` sent no session id and the request envelope had no
   `session` field, so every request ran in the default session.
 
+- Transactions were unusable: the envelope had no `txn` field and `commit`/`cancel` were
+  sent without the transaction id, so the server rejected them and queries never ran inside
+  the transaction.
+
 ### Added
 
+- Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)
+  returns a `SurrealDB::Transaction` whose query and CRUD calls carry the transaction id;
+  `commit`/`cancel` finish it. The block form commits on return and cancels on error.
 - Sessions as objects: `Client#new_session` (alias `attach`) returns a `SurrealDB::Session`
   that supports every request method and runs them in its own server session.
   `Client#fork_session` / `Session#fork_session` copy namespace, database, variables and
@@ -26,6 +33,8 @@
 
 ### Changed
 
+- **Breaking:** `begin_transaction` returns a `Transaction`; `Client#commit`/`#cancel` take
+  the transaction (or its id).
 - **Breaking:** `Client#attach` returns a `Session` instead of the raw server result, and
   `Client#detach` takes a `Session` (or its id).
 - **Breaking:** UUID values, including live query ids, decode to `SurrealDB::Uuid` instead

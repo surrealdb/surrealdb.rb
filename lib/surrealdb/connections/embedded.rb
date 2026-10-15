@@ -71,10 +71,10 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil)
+      def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
 
-        _id, encoded = @rpc.encode_request(method, params, session: session)
+        _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
         err_ptr = FFI::MemoryPointer.new(:pointer)
         res_ptr = FFI::MemoryPointer.new(:pointer)

@@ -90,10 +90,10 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil)
+      def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
 
-        id, encoded = @rpc.encode_request(method, params, session: session)
+        id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
         entry = { result: nil, cv: ConditionVariable.new }
 
         @mutex.synchronize { @pending[id] = entry }

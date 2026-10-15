@@ -61,6 +61,10 @@ module SurrealDB
 
     private
 
+    def request_session
+      @id
+    end
+
     def rpc(method, params = [])
       raise SessionError, "session #{@id} is closed" if @closed
 

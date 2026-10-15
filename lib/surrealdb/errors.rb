@@ -14,6 +14,9 @@ module SurrealDB
   # Raised when a closed session is used.
   class SessionError < Error; end
 
+  # Raised when a committed or cancelled transaction is used.
+  class TransactionError < Error; end
+
   # Base class for errors returned by the SurrealDB server.
   # Supports both legacy (code + message) and v3 structured
   # (kind + details + cause chain) error formats.

@@ -169,6 +169,64 @@ RSpec.describe SurrealDB::Client do
     end
   end
 
+  describe 'transactions' do
+    let(:connection) do
+      instance_double(SurrealDB::Connections::WebSocket, supports_transactions?: true, supports_sessions?: true)
+    end
+    let(:client) { described_class.new('ws://localhost:8000') }
+    let(:txn_id) { SurrealDB::Uuid.v4 }
+
+    before do
+      client.instance_variable_set(:@connection, connection)
+      allow(connection).to receive(:send_request).and_return(nil)
+      allow(connection).to receive(:send_request).with('begin', []).and_return(txn_id)
+    end
+
+    it 'begins a transaction and runs its requests with the txn id in the envelope' do
+      tx = client.begin_transaction
+      expect(tx.id).to eq(txn_id)
+      tx.query('CREATE person')
+      expect(connection).to have_received(:send_request)
+        .with('query', ['CREATE person'], session: nil, txn: txn_id)
+    end
+
+    it 'commits and cancels by sending the txn id as the param' do
+      client.begin_transaction.commit
+      expect(connection).to have_received(:send_request).with('commit', [txn_id], session: nil)
+      client.begin_transaction.cancel
+      expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
+    end
+
+    it 'refuses requests after the transaction is finished' do
+      tx = client.begin_transaction
+      tx.commit
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError)
+      expect { tx.commit }.to raise_error(SurrealDB::TransactionError)
+    end
+
+    it 'commits when the block returns and returns its value' do
+      expect(client.begin_transaction { |_tx| :done }).to eq(:done)
+      expect(connection).to have_received(:send_request).with('commit', [txn_id], session: nil)
+    end
+
+    it 'cancels when the block raises' do
+      expect { client.begin_transaction { |_tx| raise 'boom' } }.to raise_error('boom')
+      expect(connection).to have_received(:send_request).with('cancel', [txn_id], session: nil)
+      expect(connection).not_to have_received(:send_request).with('commit', anything, anything)
+    end
+
+    it 'runs a session transaction in that session' do
+      session = client.new_session
+      allow(connection).to receive(:send_request).with('begin', [], session: session.id).and_return(txn_id)
+      tx = session.begin_transaction
+      tx.select('person')
+      tx.commit
+      expect(connection).to have_received(:send_request)
+        .with('select', [SurrealDB::Table.new('person')], session: session.id, txn: txn_id)
+      expect(connection).to have_received(:send_request).with('commit', [txn_id], session: session.id)
+    end
+  end
+
   describe '#send_rpc' do
     let(:connection) { instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true) }
     let(:client) { described_class.new('ws://localhost:8000') }

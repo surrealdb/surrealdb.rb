@@ -48,14 +48,18 @@ module SurrealDB
         true
       end
 
-      def send_request(method, params = [], session: nil)
+      def supports_transactions?
+        true
+      end
+
+      def send_request(method, params = [], session: nil, txn: nil)
         track_state(method, params) if session.nil?
-        @inner.send_request(method, params, session: session)
+        @inner.send_request(method, params, session: session, txn: txn)
       rescue ConnectionError => e
         reconnect!
         log(:info, "Reconnected after: #{e.message}")
         replay_state
-        @inner.send_request(method, params, session: session)
+        @inner.send_request(method, params, session: session, txn: txn)
       end
 
       def session_state(session = nil)

@@ -35,9 +35,10 @@ module SurrealDB
       # @param method [String] RPC method name
       # @param params [Array] method parameters
       # @param session [Uuid, nil] attached session to run the request in
+      # @param txn [Uuid, nil] transaction to run the request in
       # @return [Object] decoded result
-      def send_request(method, params = [], session: nil)
-        result = execute(method, params, session: session)
+      def send_request(method, params = [], session: nil, txn: nil)
+        result = execute(method, params, session: session, txn: txn)
         track_request(method, params, result, session)
         result
       end
@@ -60,6 +61,12 @@ module SurrealDB
         true
       end
 
+      # Whether this connection supports interactive transactions.
+      # @return [Boolean]
+      def supports_transactions?
+        true
+      end
+
       # What the client has told a session so far.
       # @param session [Uuid, nil] nil for the default session
       # @return [SessionState, nil]
@@ -77,7 +84,7 @@ module SurrealDB
 
       # Performs one request on the transport.
       # @return [Object] decoded result
-      def execute(method, params, session: nil)
+      def execute(method, params, session: nil, txn: nil)
         raise NotImplementedError
       end
 
