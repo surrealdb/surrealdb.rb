@@ -267,8 +267,11 @@ module SurrealDB
       # would otherwise hang connect forever. Over TLS the TCP socket can be
       # readable with only part of a TLS record, on which a blocking read
       # would wait for the rest, so the SSL socket is read without blocking.
+      # The deadline is checked before every read too, as a server that keeps
+      # sending part of an answer never makes a read wait.
       def read_handshake(deadline)
         loop do
+          remaining(deadline, 'WebSocket handshake')
           return @socket.read_nonblock(16_384)
         rescue IO::WaitReadable
           wait_for_handshake(:wait_readable, deadline)

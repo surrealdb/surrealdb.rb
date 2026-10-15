@@ -46,4 +46,13 @@ RSpec.describe SurrealDB::FileRef do
   it 'compares by value' do
     expect(described_class.new('b', '/k')).to eq(described_class.new('b', 'k'))
   end
+
+  it 'says whether to_s is a SurrealQL literal, which allows only a few characters' do
+    expect(described_class.new('my-bucket_1', '/a/b.c-d_e')).to be_literal
+    ['a b', 'a"b', "\u00e9", 'a\\b'].each do |key|
+      expect(described_class.new('b', key)).not_to be_literal
+    end
+    expect(described_class.new('my bucket', '/k')).not_to be_literal
+    expect(described_class.new('a/b', '/k')).not_to be_literal
+  end
 end
