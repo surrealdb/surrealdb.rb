@@ -30,6 +30,7 @@ module SurrealDB
       EXPORT          = 'export'
       ATTACH          = 'attach'
       DETACH          = 'detach'
+      SESSIONS        = 'sessions'
       BEGIN_TXN       = 'begin'
       COMMIT          = 'commit'
       CANCEL          = 'cancel'

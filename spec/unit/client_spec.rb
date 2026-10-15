@@ -46,10 +46,6 @@ RSpec.describe SurrealDB::Client do
   describe 'session/transaction gating' do
     let(:client) { described_class.new('http://localhost:8000') }
 
-    it 'raises UnsupportedError for #attach on HTTP' do
-      expect { client.attach }.to raise_error(SurrealDB::UnsupportedError, /sessions/)
-    end
-
     it 'raises UnsupportedError for #begin_transaction on HTTP' do
       expect { client.begin_transaction }.to raise_error(SurrealDB::UnsupportedError, /transactions/)
     end
@@ -130,8 +126,76 @@ RSpec.describe SurrealDB::Client do
     end
   end
 
+  describe 'sessions' do
+    let(:connection) do
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true,
+                                                         supports_session_listing?: true)
+    end
+    let(:client) { described_class.new('ws://localhost:8000') }
+
+    before do
+      client.instance_variable_set(:@connection, connection)
+      allow(connection).to receive(:send_request)
+    end
+
+    it 'attaches with a fresh client-generated id in the envelope' do
+      session = client.new_session
+      expect(session.id).to be_a(SurrealDB::Uuid)
+      expect(connection).to have_received(:send_request).with('attach', [], session: session.id)
+    end
+
+    it 'runs requests made through the session in that session' do
+      session = client.new_session
+      session.select('person')
+      expect(connection).to have_received(:send_request)
+        .with('select', [SurrealDB::Table.new('person')], session: session.id)
+    end
+
+    it 'detaches by id and refuses further use' do
+      session = client.new_session
+      session.close
+      expect(connection).to have_received(:send_request).with('detach', [], session: session.id)
+      expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    end
+
+    it 'closes a Session detached through the client' do
+      session = client.new_session
+      client.detach(session)
+      expect(session).to be_closed
+      expect { session.select('person') }.to raise_error(SurrealDB::SessionError)
+      session.close
+      expect(connection).to have_received(:send_request).with('detach', [], session: session.id).once
+    end
+
+    it 'runs transactions begun through a session in that session' do
+      session = client.new_session
+      session.begin_transaction
+      expect(connection).to have_received(:send_request).with('begin', [], session: session.id)
+    end
+
+    it 'refuses to list sessions over HTTP, where the server rejects it' do
+      http = described_class.new('http://localhost:8000')
+      allow(http.connection).to receive(:send_request)
+      expect { http.sessions }.to raise_error(SurrealDB::UnsupportedError, /listing sessions/)
+      expect(http.connection).not_to have_received(:send_request)
+    end
+
+    it 'detaches when the block form returns, even on error' do
+      captured = nil
+      expect do
+        client.new_session do |s|
+          captured = s
+          raise 'boom'
+        end
+      end.to raise_error('boom')
+      expect(captured).to be_closed
+    end
+  end
+
   describe '#send_rpc' do
-    let(:connection) { instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true) }
+    let(:connection) do
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true)
+    end
     let(:client) { described_class.new('ws://localhost:8000') }
 
     before do
@@ -143,6 +207,12 @@ RSpec.describe SurrealDB::Client do
       result = client.send_rpc('custom_method', [1, 2, 3])
       expect(connection).to have_received(:send_request).with('custom_method', [1, 2, 3])
       expect(result).to eq('ok')
+    end
+
+    it 'runs them in the session it is called on' do
+      session = client.new_session
+      session.send_rpc('custom_method', [1])
+      expect(connection).to have_received(:send_request).with('custom_method', [1], session: session.id)
     end
   end
 
@@ -164,5 +234,32 @@ RSpec.describe SurrealDB::Client do
       client.run('fn::test', 'arg1', version: '1.0.0')
       expect(connection).to have_received(:send_request).with('run', ['fn::test', '1.0.0', ['arg1']])
     end
+  end
+end
+
+RSpec.describe SurrealDB::Connections::HTTP, '#close' do
+  let(:connection) { described_class.new('http://localhost:8000') }
+  let(:first) { SurrealDB::Uuid.v4 }
+  let(:second) { SurrealDB::Uuid.v4 }
+
+  before do
+    connection.instance_variable_set(:@connected, true)
+    allow(connection).to receive(:execute).and_return(nil)
+    connection.send_request('attach', [], session: first)
+    connection.send_request('attach', [], session: second)
+  end
+
+  it 'detaches the sessions still attached, which the server would otherwise keep' do
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: first))
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: second))
+    expect(connection).not_to be_connected
+  end
+
+  it 'stops trying once the server cannot be reached' do
+    allow(connection).to receive(:execute).with('detach', any_args).and_raise(SurrealDB::ConnectionError, 'down')
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', any_args).once
+    expect(connection).not_to be_connected
   end
 end

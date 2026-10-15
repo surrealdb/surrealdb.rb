@@ -223,3 +223,98 @@ RSpec.shared_examples 'value round-trips' do
     end
   end
 end
+
+RSpec.shared_examples 'sessions' do
+  after { client.close }
+
+  def where_am_i(target)
+    target.query_raw('RETURN [session::ns(), session::db()]')[0].result
+  end
+
+  # Whether the session is signed in as a user allowed to define things.
+  def can_define?(target)
+    target.query_raw("DEFINE TABLE OVERWRITE #{unique_table('auth')}")[0].ok?
+  end
+
+  def signed_in_session
+    session = client.new_session
+    session.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    session.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    session
+  end
+
+  it 'runs a new session independently of the default session' do
+    session = client.new_session
+    expect(session.id).to be_a(SurrealDB::Uuid)
+    expect(where_am_i(session)).to eq([SurrealDB::NONE, SurrealDB::NONE])
+
+    session.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    session.use('sess_ns', 'sess_db')
+    expect(where_am_i(session)).to eq(%w[sess_ns sess_db])
+    expect(where_am_i(client)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+  ensure
+    session&.close
+  end
+
+  it 'keeps variables per session' do
+    one = signed_in_session
+    two = signed_in_session
+    one.set('who', 'one')
+    two.set('who', 'two')
+    expect(one.query_raw('RETURN $who')[0].result).to eq('one')
+    expect(two.query_raw('RETURN $who')[0].result).to eq('two')
+    two.unset('who')
+    expect(two.query_raw('RETURN $who')[0].result).to eq(SurrealDB::NONE)
+  ensure
+    one&.close
+    two&.close
+  end
+
+  it 'keeps credentials per session' do
+    session = client.new_session
+    session.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    expect(can_define?(session)).to be(false)
+    expect(can_define?(client)).to be(true)
+  ensure
+    session&.close
+  end
+
+  it 'detaches a session' do
+    session = client.new_session
+    id = session.id
+    session.close
+    expect(session).to be_closed
+    expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    expect { client.connection.send_request('query', ['RETURN 1'], session: id) }
+      .to raise_error(SurrealDB::NotFoundError, /Session not found/)
+  end
+
+  it 'detaches when the block returns' do
+    id = client.new_session(&:id)
+    expect { client.connection.send_request('query', ['RETURN 1'], session: id) }
+      .to raise_error(SurrealDB::NotFoundError)
+  end
+
+  it 'forks a session with its namespace, database, variables and credentials' do
+    source = signed_in_session
+    source.set('greeting', 'hello')
+    source.fork_session do |fork|
+      expect(fork.id).not_to eq(source.id)
+      expect(where_am_i(fork)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+      expect(fork.query_raw('RETURN $greeting')[0].result).to eq('hello')
+      expect(can_define?(fork)).to be(true)
+
+      fork.set('greeting', 'changed')
+      expect(source.query_raw('RETURN $greeting')[0].result).to eq('hello')
+    end
+  ensure
+    source&.close
+  end
+
+  it 'forks the default session' do
+    client.fork_session do |fork|
+      expect(where_am_i(fork)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+      expect(can_define?(fork)).to be(true)
+    end
+  end
+end

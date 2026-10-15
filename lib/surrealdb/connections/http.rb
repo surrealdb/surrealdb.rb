@@ -8,7 +8,7 @@ module SurrealDB
     # HTTP transport for SurrealDB RPC.
     #
     # Each request is a synchronous POST to /rpc with a CBOR body.
-    # Does not support live queries, sessions, or transactions.
+    # Does not support live queries, listing sessions, or transactions.
     #
     # ## Thread Safety
     #
@@ -21,9 +21,6 @@ module SurrealDB
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
         @http = nil
-        @namespace = nil
-        @database = nil
-        @auth_token = nil
       end
 
       def connect
@@ -43,41 +40,61 @@ module SurrealDB
       def close
         return unless @connected
 
+        detach_sessions
         @http&.finish if @http&.started?
         @connected = false
         @http = nil
         log(:debug, 'HTTP connection closed')
       end
 
-      def send_request(method, params = [])
+      # The server refuses `sessions` over HTTP.
+      # @return [Boolean]
+      def supports_session_listing?
+        false
+      end
+
+      protected
+
+      def execute(method, params, session: nil)
         raise ConnectionError, 'not connected' unless @connected
 
-        _id, encoded = @rpc.encode_request(method, params)
+        _id, encoded = @rpc.encode_request(method, params, session: session)
 
-        track_use(method, params)
-
-        request = build_request(encoded)
+        request = build_request(encoded, session_state(session) || session_state)
         response = execute_request(request)
 
         decoded = @rpc.decode_response(response.body)
-        result = Protocol::Response.extract_result(decoded)
-
-        track_auth(method, params, result)
-        result
+        Protocol::Response.extract_result(decoded)
       end
 
       private
 
-      def build_request(body)
+      # The server keeps an attached HTTP session until it is detached:
+      # unlike a WebSocket's, it does not end with the connection.
+      def detach_sessions
+        attached_sessions.each_key do |id|
+          send_request(Protocol::Methods::DETACH, [], session: id)
+        rescue ServerError => e
+          log(:debug, "Could not detach session #{id} on close: #{e.message}")
+        rescue Error => e
+          log(:debug, "Could not detach sessions on close: #{e.message}")
+          break # the server cannot be reached; the others would only wait as long
+        end
+      end
+
+      # Each HTTP request runs in a fresh server session unless it names an
+      # attached one, so the namespace, database and token the client has
+      # been given travel as headers on every request.
+      def build_request(body, state)
         uri = URI.parse(@url)
         path = uri.path.empty? ? '/rpc' : uri.path
 
         req = Net::HTTP::Post.new(path)
         req['Content-Type'] = 'application/cbor'
         req['Accept'] = 'application/cbor'
-        req['Authorization'] = "Bearer #{@auth_token}" if @auth_token
-        req['surreal-ns'] = @namespace if @namespace
-        req['surreal-db'] = @database if @database
+        req['Authorization'] = "Bearer #{state.access_token}" if state.access_token
+        req['surreal-ns'] = state.namespace if state.namespace
+        req['surreal-db'] = state.database if state.database
         req.body = body
         req
       end
@@ -93,31 +110,6 @@ module SurrealDB
       rescue Errno::ECONNREFUSED, Errno::ECONNRESET, SocketError => e
         @connected = false
         raise ConnectionError, "HTTP connection error: #{e.message}"
-      end
-
-      def track_use(method, params)
-        return unless method == Protocol::Methods::USE
-
-        @namespace = params[0] if params[0]
-        @database = params[1] if params[1]
-      end
-
-      def track_auth(method, params, result)
-        case method
-        when Protocol::Methods::SIGNIN, Protocol::Methods::SIGNUP
-          @auth_token = extract_token(result)
-        when Protocol::Methods::AUTHENTICATE
-          @auth_token = params[0]
-        when Protocol::Methods::INVALIDATE
-          @auth_token = nil
-        end
-      end
-
-      def extract_token(result)
-        case result
-        when String then result
-        when Hash then result['access'] || result['token']
-        end
       end
 
       def log(level, message)

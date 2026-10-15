@@ -8,7 +8,8 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       connect: nil,
       close: nil,
       connected?: true,
-      supports_live_queries?: true
+      supports_live_queries?: true,
+      attached_sessions: {}
     )
   end
   let(:reliable) { described_class.new(inner, reconnect_max_retries: 2, reconnect_delay: 0.01) }
@@ -64,7 +65,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('use', %w[ns db]).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('use', %w[ns db], session: nil).at_least(:twice)
     end
 
     it 'replays let variables after reconnect' do
@@ -82,7 +83,56 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('let', %w[key value]).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('let', %w[key value], session: nil).at_least(:twice)
+    end
+  end
+
+  describe 'attached sessions' do
+    let(:inner) { SurrealDB::Connections::WebSocket.new('ws://localhost:8000') }
+    let(:session) { SurrealDB::Uuid.v4 }
+    let(:sent) { [] }
+
+    it 'attaches them again with their state before retrying a request made in one' do
+      dropped = false
+      allow(inner).to receive_messages(connect: nil, close: nil)
+      allow(inner).to receive(:execute) do |method, params, session: nil|
+        sent << [method, params, session]
+        if method == 'select' && !dropped
+          dropped = true
+          raise SurrealDB::ConnectionError, 'disconnected'
+        end
+      end
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('use', %w[ns db], session: session)
+      reliable.send_request('let', ['x', 1], session: session)
+      sent.clear
+
+      reliable.send_request('select', ['person'], session: session)
+      expect(sent).to eq([
+                           ['select', ['person'], session],
+                           ['attach', [], session], ['use', %w[ns db], session], ['let', ['x', 1], session],
+                           ['select', ['person'], session]
+                         ])
+    end
+
+    it 'signs them in again with the credentials they signed in with, not their token, which may have expired' do
+      dropped = false
+      allow(inner).to receive_messages(connect: nil, close: nil)
+      allow(inner).to receive(:execute) do |method, params, session: nil|
+        sent << [method, params, session]
+        if method == 'select' && !dropped
+          dropped = true
+          raise SurrealDB::ConnectionError, 'disconnected'
+        end
+        'token' if method == 'signin'
+      end
+      reliable.send_request('attach', [], session: session)
+      reliable.send_request('signin', [{ 'user' => 'u', 'pass' => 'p' }], session: session)
+      sent.clear
+
+      reliable.send_request('select', ['person'], session: session)
+      expect(sent).to include(['signin', [{ 'user' => 'u', 'pass' => 'p' }], session])
+      expect(sent.map(&:first)).not_to include('authenticate')
     end
   end
 

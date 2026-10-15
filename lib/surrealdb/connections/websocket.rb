@@ -71,22 +71,6 @@ module SurrealDB
         log(:debug, 'WebSocket connection closed')
       end
 
-      def send_request(method, params = [])
-        raise ConnectionError, 'not connected' unless @connected
-
-        id, encoded = @rpc.encode_request(method, params)
-        entry = { result: nil, cv: ConditionVariable.new }
-
-        @mutex.synchronize { @pending[id] = entry }
-
-        begin
-          @write_mutex.synchronize { @driver.binary(encoded) }
-          wait_for_response(entry)
-        ensure
-          @mutex.synchronize { @pending.delete(id) }
-        end
-      end
-
       def supports_live_queries?
         true
       end
@@ -102,6 +86,24 @@ module SurrealDB
       # @param live_query_id [String]
       def remove_notification_handler(live_query_id)
         @mutex.synchronize { @live_handlers.delete(live_query_id) }
+      end
+
+      protected
+
+      def execute(method, params, session: nil)
+        raise ConnectionError, 'not connected' unless @connected
+
+        id, encoded = @rpc.encode_request(method, params, session: session)
+        entry = { result: nil, cv: ConditionVariable.new }
+
+        @mutex.synchronize { @pending[id] = entry }
+
+        begin
+          @write_mutex.synchronize { @driver.binary(encoded) }
+          wait_for_response(entry)
+        ensure
+          @mutex.synchronize { @pending.delete(id) }
+        end
       end
 
       private
@@ -284,10 +286,6 @@ module SurrealDB
 
         response = @rpc.decode_response(result)
         Protocol::Response.extract_result(response)
-      end
-
-      def log(level, message)
-        SurrealDB.configuration.logger&.send(level, message)
       end
 
       # Minimal wrapper that gives websocket-driver the interface it expects:

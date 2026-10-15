@@ -55,7 +55,7 @@ The SDK supports three transport protocols, selected automatically by URL scheme
 | Scheme | Transport | Live Queries | Sessions | Requires |
 |--------|-----------|:------------:|:--------:|----------|
 | `ws://`, `wss://` | WebSocket | Yes | Yes | -- |
-| `http://`, `https://` | HTTP | No | No | -- |
+| `http://`, `https://` | HTTP | No | Yes | -- |
 | `mem://`, `surrealkv://`, `file://` | Embedded | Yes | Yes | `surrealdb-embedded` gem |
 
 ```ruby
@@ -208,6 +208,33 @@ results.each do |qr|
   else
     puts "Error: #{qr.error}"
   end
+end
+```
+
+## Sessions
+
+One connection can hold several server sessions, each with its own namespace,
+database, variables and credentials. Requests made on the client itself run in
+the connection's default session.
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+  db.use("test", "test")
+
+  # A fresh session starts empty, and is detached when the block returns
+  db.new_session do |session|
+    session.use("test", "other")
+    session.signin("user" => "root", "pass" => "root")
+    session.query_raw("RETURN session::db()")  # runs in "other"
+  end
+
+  # A fork starts with a copy of the default session's state
+  fork = db.fork_session
+  fork.set("tenant", "acme")
+  fork.close
+
+  db.sessions # => ids of the sessions attached on this connection (not over HTTP)
 end
 ```
 

@@ -11,6 +11,9 @@ module SurrealDB
   # (e.g. live queries on HTTP).
   class UnsupportedError < Error; end
 
+  # Raised when a closed session is used.
+  class SessionError < Error; end
+
   # Base class for errors returned by the SurrealDB server.
   # Supports both legacy (code + message) and v3 structured
   # (kind + details + cause chain) error formats.

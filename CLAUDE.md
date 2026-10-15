@@ -65,7 +65,7 @@ SurrealDB encodes custom types via numbered CBOR tags. See `lib/surrealdb/cbor/t
 
 6. **`send_rpc` escape hatch**: `Client#send_rpc(method, params)` forwards directly to the connection, letting users call new or undocumented RPC methods without waiting for SDK wrapper methods.
 
-7. **Sessions and transactions** (WebSocket only): `Client#attach`, `#detach`, `#begin_transaction`, `#commit`, `#cancel` wrap the SurrealDB v3 session/transaction RPC methods. These raise `UnsupportedError` on HTTP connections.
+7. **Sessions**: the request envelope is `{id, method, params, session?}`. `Client#new_session` generates a UUID, sends `attach` with it in the envelope, and returns a `Session` whose requests carry that id. `Client` and `Session` share `RequestMethods`; each implements `rpc`. Connections keep a `SessionState` per session (ns/db, variables, tokens) updated after each successful request; it backs `fork_session`, HTTP headers and reconnect replay. Sessions work over WebSocket and HTTP.
 
 8. **Embedded connection** (opt-in): `require "surrealdb/embedded"` loads FFI bindings to `libsurrealdb_c`. Uses the same CBOR RPC protocol as WebSocket/HTTP -- the C library only handles byte transport. Only 8 C functions are wrapped. All FFI calls use `blocking: true` to release the GVL.
 
