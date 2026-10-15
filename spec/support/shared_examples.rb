@@ -495,3 +495,111 @@ RSpec.shared_examples 'session lifecycle' do
     expect(client.healthy?).to be(true)
   end
 end
+
+# Expects `url`. Record users sign up through an access whose tokens last
+# two seconds, so renewal can be seen happening.
+RSpec.shared_examples 'token refresh' do
+  let(:database) { unique_table('tokens') }
+  let(:ns) { SurrealHelper::SURREAL_NS }
+  let(:root) do
+    new_test_client(url).tap do |c|
+      c.use(ns, database)
+      c.query(<<~SQL)
+        DEFINE TABLE OVERWRITE user SCHEMALESS PERMISSIONS FOR select WHERE id = $auth.id;
+        DEFINE ACCESS OVERWRITE with_refresh ON DATABASE TYPE RECORD
+          SIGNUP (CREATE user SET name = $name, pass = crypto::argon2::generate($pass))
+          SIGNIN (SELECT * FROM user WHERE name = $name AND crypto::argon2::compare(pass, $pass))
+          WITH REFRESH
+          DURATION FOR TOKEN 2s, FOR SESSION 1h;
+        DEFINE ACCESS OVERWRITE plain ON DATABASE TYPE RECORD
+          SIGNUP (CREATE user SET name = $name, pass = crypto::argon2::generate($pass))
+          SIGNIN (SELECT * FROM user WHERE name = $name AND crypto::argon2::compare(pass, $pass))
+          DURATION FOR TOKEN 2s, FOR SESSION 1h;
+      SQL
+    end
+  end
+  let(:user) { SurrealDB::Client.new(url, **client_options).tap(&:connect) }
+  let(:client_options) { {} }
+
+  after do
+    user.close
+    root.close
+  end
+
+  def credentials(access, name = "u#{SecureRandom.hex(4)}")
+    { 'ns' => ns, 'db' => database, 'ac' => access, 'name' => name, 'pass' => 'secret' }
+  end
+
+  def who
+    user.query('RETURN $auth.name')[0]
+  end
+
+  def sleep_past_expiry
+    expires_at = user.connection.session_state.access_expires_at
+    sleep(expires_at - Time.now + 0.3)
+  end
+
+  it 'signs up with an access and a refresh token, and refreshes them' do
+    root
+    tokens = user.signup(credentials('with_refresh', 'alice'))
+    expect(tokens.keys).to contain_exactly('access', 'refresh')
+
+    renewed = user.refresh
+    expect(renewed.keys).to contain_exactly('access', 'refresh')
+    expect(renewed['refresh']).not_to eq(tokens['refresh'])
+    expect(who).to eq('alice')
+
+    # the refresh token is single use
+    expect { user.refresh(tokens) }.to raise_error(SurrealDB::NotAllowedError)
+  end
+
+  it 'revokes the refresh token' do
+    root
+    user.signup(credentials('with_refresh'))
+    tokens = user.connection.session_state.tokens
+    user.revoke
+    expect { user.refresh }.to raise_error(ArgumentError, /no refresh token/)
+    expect { user.refresh(tokens) }.to raise_error(SurrealDB::NotAllowedError)
+  end
+
+  it 'renews an expiring token with the refresh token' do
+    root
+    user.signup(credentials('with_refresh', 'bob'))
+    first = user.connection.session_state.access_token
+    sleep_past_expiry
+    expect(who).to eq('bob')
+    expect(user.connection.session_state.access_token).not_to eq(first)
+  end
+
+  it 'renews an expiring token by signing in again when there is no refresh token' do
+    root
+    SurrealDB::Client.new(url).tap(&:connect).then do |c|
+      c.signup(credentials('plain', 'carol'))
+      c.close
+    end
+    user.signin(credentials('plain', 'carol'))
+    sleep_past_expiry
+    expect(who).to eq('carol')
+  end
+
+  context 'with renew_tokens: false' do
+    let(:client_options) { { renew_tokens: false } }
+
+    it 'leaves an expired token alone' do
+      root
+      user.signup(credentials('with_refresh', 'dave'))
+      first = user.connection.session_state.access_token
+      sleep_past_expiry
+      begin
+        user.query('RETURN 1')
+      rescue SurrealDB::ServerError
+        nil # HTTP refuses the expired token outright
+      end
+      expect(user.connection.session_state.access_token).to eq(first)
+    end
+  end
+
+  it 'refuses refresh without a refresh token' do
+    expect { user.refresh }.to raise_error(ArgumentError, /no refresh token/)
+  end
+end

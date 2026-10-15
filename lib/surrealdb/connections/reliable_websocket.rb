@@ -295,16 +295,28 @@ module SurrealDB
       end
 
       # Re-presents the token; when the server no longer accepts it (it
-      # expired while we were away), signs in again with the credentials the
-      # session last signed in with. A signup is never repeated.
+      # expired while we were away), uses the refresh token, or signs in again
+      # with the credentials the session last signed in with. A signup is
+      # never repeated.
       def restore_auth(id, state)
         return unless state.access_token
 
         @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id)
       rescue ServerError => e
-        raise unless state.signin
+        raise unless state.renewable?
 
-        log(:info, "Stored token rejected after reconnect (#{e.message}); signing in again")
+        log(:info, "Stored token rejected after reconnect (#{e.message}); renewing it")
+        renew_auth(id, state)
+      end
+
+      def renew_auth(id, state)
+        if state.refresh_token
+          begin
+            return @inner.send_request(Protocol::Methods::REFRESH, [state.tokens], session: id)
+          rescue ServerError
+            raise unless state.signin
+          end
+        end
         @inner.send_request(*state.signin, session: id)
       end
 

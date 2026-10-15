@@ -61,6 +61,14 @@ module SurrealDB
       # Methods that take query variables as their second param.
       VARIABLE_METHODS = [Protocol::Methods::QUERY].freeze
 
+      # Methods that carry their own credentials in the body. They are sent
+      # without the bearer header: when the current access token has expired,
+      # the server would refuse the whole request because of it.
+      CREDENTIAL_METHODS = [
+        Protocol::Methods::SIGNIN, Protocol::Methods::SIGNUP, Protocol::Methods::AUTHENTICATE,
+        Protocol::Methods::REFRESH, Protocol::Methods::REVOKE
+      ].freeze
+
       def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
 
@@ -76,7 +84,8 @@ module SurrealDB
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
-        request = build_request(encoded, session_state(session) || session_state)
+        request = build_request(encoded, session_state(session) || session_state,
+                                bearer: !CREDENTIAL_METHODS.include?(method))
         response = execute_request(request)
 
         decoded = @rpc.decode_response(response.body)
@@ -97,14 +106,14 @@ module SurrealDB
       # Each HTTP request runs in a fresh server session unless it names an
       # attached one, so the namespace, database and token the client has
       # been given travel as headers on every request.
-      def build_request(body, state)
+      def build_request(body, state, bearer: true)
         uri = URI.parse(@url)
         path = uri.path.empty? ? '/rpc' : uri.path
 
         req = Net::HTTP::Post.new(path)
         req['Content-Type'] = 'application/cbor'
         req['Accept'] = 'application/cbor'
-        req['Authorization'] = "Bearer #{state.access_token}" if state.access_token
+        req['Authorization'] = "Bearer #{state.access_token}" if bearer && state.access_token
         req['surreal-ns'] = state.namespace if state.namespace
         req['surreal-db'] = state.database if state.database
         req.body = body

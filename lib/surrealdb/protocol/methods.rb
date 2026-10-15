@@ -12,6 +12,8 @@ module SurrealDB
       AUTHENTICATE    = 'authenticate'
       INVALIDATE      = 'invalidate'
       RESET           = 'reset'
+      REFRESH         = 'refresh'
+      REVOKE          = 'revoke'
       LET             = 'let'
       UNSET           = 'unset'
       LIVE            = 'live'

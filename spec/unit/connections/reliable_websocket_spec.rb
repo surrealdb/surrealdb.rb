@@ -56,6 +56,8 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
         when 'live' then SurrealDB::Uuid.parse(format('00000000-0000-4000-8000-%012d', @live_counter += 1))
         when 'begin' then SurrealDB::Uuid.parse('11111111-1111-4111-8111-111111111111')
         when 'signin' then 'token-1'
+        when 'signup' then { 'access' => 'a1', 'refresh' => 'r1' }
+        when 'refresh' then { 'access' => 'a2', 'refresh' => 'r2' }
         else 'ok'
         end
       end
@@ -177,6 +179,18 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       inner.calls.clear
       drop
       expect(inner.calls).to include(['signin', [{ 'user' => 'root', 'pass' => 'root' }], nil, nil])
+    end
+
+    it 'uses the refresh token when the stored token is refused' do
+      reliable.send_request('signup', [{ 'ac' => 'user' }])
+      allow(inner).to receive(:send_request).and_call_original
+      allow(inner).to receive(:send_request).with('authenticate', anything, any_args)
+                                            .and_raise(SurrealDB::ServerError, 'token expired')
+      inner.calls.clear
+      drop
+      expect(inner.calls).to include(['refresh', [{ 'access' => 'a1', 'refresh' => 'r1' }], nil, nil])
+      expect(methods_sent).not_to include('signup')
+      expect(reliable.session_state.tokens).to eq({ 'access' => 'a2', 'refresh' => 'r2' })
     end
 
     it 'never repeats a signup' do

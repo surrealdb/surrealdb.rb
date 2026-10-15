@@ -66,11 +66,53 @@ module SurrealDB
       rpc(Protocol::Methods::SIGNUP, [credentials])
     end
 
-    # Authenticates with an existing JWT token.
-    # @param token [String]
+    # Authenticates with an existing token, or with the access and refresh
+    # tokens `signin`/`signup` returned (the refresh token is kept, for
+    # {#refresh} and automatic renewal).
+    # @param token [String, Hash] an access token, or {"access" => ..., "refresh" => ...}
     # @return [void]
     def authenticate(token)
-      rpc(Protocol::Methods::AUTHENTICATE, [token])
+      return rpc(Protocol::Methods::AUTHENTICATE, [token]) unless token.is_a?(Hash)
+
+      rpc(Protocol::Methods::AUTHENTICATE, [token.fetch('access') { token.fetch(:access) }])
+      request_state&.refresh_token = token['refresh'] || token[:refresh]
+      nil
+    end
+
+    # Exchanges a refresh token for a new access and refresh token, and
+    # authenticates the session with them. The refresh token used is no
+    # longer valid afterwards.
+    #
+    # Sessions renew their tokens on their own shortly before they expire
+    # (see the `renew_tokens` and `token_refresh_margin` client options);
+    # call this to do it now.
+    #
+    # @param tokens [Hash, nil] {"access" => ..., "refresh" => ...}; defaults to this session's
+    # @return [Hash] the new {"access" => ..., "refresh" => ...}
+    # @raise [ArgumentError] when there is no refresh token to use
+    # @raise [NotAllowedError] when the server refuses the refresh token
+    def refresh(tokens = nil)
+      tokens ||= request_state&.tokens
+      raise ArgumentError, 'no refresh token: sign in with an access method defined WITH REFRESH' unless
+        tokens.is_a?(Hash) && (tokens['refresh'] || tokens[:refresh])
+
+      rpc(Protocol::Methods::REFRESH, [tokens.transform_keys(&:to_s)])
+    end
+
+    # Revokes a refresh token, so it can no longer be used to get new
+    # tokens. The access token stays valid until it expires.
+    # @param tokens [Hash, nil] {"access" => ..., "refresh" => ...}; defaults to this session's
+    # @return [void]
+    # @raise [ArgumentError] when there is no refresh token to revoke
+    def revoke(tokens = nil)
+      tokens ||= request_state&.tokens
+      unless tokens.is_a?(Hash) && (tokens['refresh'] || tokens[:refresh])
+        raise ArgumentError,
+              'no refresh token to revoke'
+      end
+
+      rpc(Protocol::Methods::REVOKE, [tokens.transform_keys(&:to_s)])
+      nil
     end
 
     # Invalidates the current session.

@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require 'base64'
+require 'json'
+
 module SurrealDB
   module Connections
     # What the client has told one server session: its namespace and database,
@@ -14,7 +17,10 @@ module SurrealDB
       attr_accessor :namespace, :database
 
       # @return [String, nil] current access token
-      attr_accessor :access_token
+      attr_reader :access_token
+
+      # @return [Time, nil] when the access token expires, when it says
+      attr_reader :access_expires_at
 
       # @return [String, nil] current refresh token
       attr_accessor :refresh_token
@@ -29,7 +35,7 @@ module SurrealDB
       def initialize
         @namespace = nil
         @database = nil
-        @access_token = nil
+        self.access_token = nil
         @refresh_token = nil
         @variables = {}
         @signin = nil
@@ -45,8 +51,9 @@ module SurrealDB
         when Protocol::Methods::SIGNIN
           @signin = [method, params]
           store_tokens(result)
-        when Protocol::Methods::SIGNUP then store_tokens(result)
-        when Protocol::Methods::AUTHENTICATE then store_tokens(params[0])
+        when Protocol::Methods::SIGNUP, Protocol::Methods::REFRESH then store_tokens(result)
+        when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
+        when Protocol::Methods::REVOKE then forget_revoked(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
         when Protocol::Methods::RESET then reset
         when Protocol::Methods::LET, 'set' then @variables[params[0].to_s] = params[1]
@@ -57,6 +64,59 @@ module SurrealDB
       # @return [Boolean] whether the session holds credentials
       def authenticated?
         !@access_token.nil?
+      end
+
+      # @param token [String, nil]
+      def access_token=(token)
+        @access_token = token
+        claims = self.class.token_claims(token) || {}
+        exp = claims['exp']
+        iat = claims['iat']
+        @access_expires_at = (Time.at(exp) if exp.is_a?(Numeric))
+        @access_lifetime = (exp - iat if exp.is_a?(Numeric) && iat.is_a?(Numeric))
+      end
+
+      # The access token as a pair with the refresh token, as the server's
+      # `refresh` and `revoke` methods take them.
+      # @return [Hash, nil]
+      def tokens
+        return nil unless @access_token
+
+        { 'access' => @access_token, 'refresh' => @refresh_token }.compact
+      end
+
+      # Whether the access token expires within `margin` seconds. The margin
+      # is capped at a quarter of the token's lifetime, so a short-lived token
+      # is not renewed on every request.
+      # @param margin [Numeric]
+      # @param now [Time]
+      # @return [Boolean]
+      def expiring?(margin, now = Time.now)
+        return false unless @access_expires_at
+
+        margin = [margin, @access_lifetime / 4.0].min if @access_lifetime
+        @access_expires_at - now <= margin
+      end
+
+      # Whether an expiring token can be renewed: with the refresh token, or
+      # by signing in again.
+      # @return [Boolean]
+      def renewable?
+        !@refresh_token.nil? || !@signin.nil?
+      end
+
+      # The claims of a JWT, decoded but not verified: they only decide when
+      # to ask the server for a new token.
+      # @param token [String, nil]
+      # @return [Hash, nil] nil for a token that is not a JWT
+      def self.token_claims(token)
+        payload = token.to_s.split('.')[1]
+        return nil unless payload
+
+        claims = JSON.parse(Base64.urlsafe_decode64(payload + ('=' * (-payload.length % 4))))
+        claims.is_a?(Hash) ? claims : nil
+      rescue ArgumentError, JSON::ParserError
+        nil
       end
 
       # An independent copy, for forking a session.
@@ -73,7 +133,7 @@ module SurrealDB
       end
 
       def clear_auth
-        @access_token = nil
+        self.access_token = nil
         @refresh_token = nil
         @signin = nil
       end
@@ -115,12 +175,26 @@ module SurrealDB
       def store_tokens(result)
         case result
         when String
-          @access_token = result
+          self.access_token = result
           @refresh_token = nil
         when Hash
-          @access_token = result['access'] || result['token']
+          self.access_token = result['access'] || result['token']
           @refresh_token = result['refresh']
         end
+      end
+
+      # Re-presenting the current token (as a reconnect does) changes
+      # nothing; a different token is a different identity, so the refresh
+      # token and sign-in credentials of the previous one are dropped.
+      def authenticated_with(token)
+        return if token == @access_token
+
+        store_tokens(token)
+        @signin = nil
+      end
+
+      def forget_revoked(tokens)
+        @refresh_token = nil if tokens.is_a?(Hash) && tokens['refresh'] == @refresh_token
       end
     end
   end

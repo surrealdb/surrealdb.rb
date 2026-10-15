@@ -110,12 +110,36 @@ SurrealDB.connect("ws://localhost:8000") do |db|
     "password" => "password123"
   )
 
-  # Token authentication
+  # Token authentication (a token, or the {"access", "refresh"} pair signin returns)
   db.authenticate(token)
 
   # Invalidate session
   db.invalidate
 end
+```
+
+### Token refresh
+
+When an access method is defined `WITH REFRESH`, `signin` and `signup` return
+`{"access" => ..., "refresh" => ...}`. Sessions renew their access token on
+their own shortly before it expires: with the refresh token when they have one,
+otherwise by signing in again with the credentials they last signed in with.
+Without this, a WebSocket session whose token expires carries on unauthenticated.
+
+```ruby
+client = SurrealDB::Client.new("ws://localhost:8000",
+  token_refresh_margin: 60, # renew this many seconds before expiry (default 60)
+  renew_tokens: true        # set to false to manage tokens yourself
+)
+
+client.connect
+client.signup(
+  "ns" => "my_namespace", "db" => "my_database", "ac" => "user_access",
+  "username" => "bob", "password" => "password123"
+) # => { "access" => "...", "refresh" => "..." }
+
+client.refresh # exchange the refresh token for new tokens now
+client.revoke  # revoke the refresh token; the access token lasts until it expires
 ```
 
 ## CRUD Operations

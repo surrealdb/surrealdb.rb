@@ -42,7 +42,8 @@ RSpec.describe 'README examples', :integration do
       DEFINE USER OVERWRITE db_user ON DATABASE PASSWORD 'db_pass' ROLES OWNER;
       DEFINE ACCESS OVERWRITE user_access ON DATABASE TYPE RECORD
         SIGNUP (CREATE user SET username = $username, password = crypto::argon2::generate($password))
-        SIGNIN (SELECT * FROM user WHERE username = $username AND crypto::argon2::compare(password, $password));
+        SIGNIN (SELECT * FROM user WHERE username = $username AND crypto::argon2::compare(password, $password))
+        WITH REFRESH;
     SQL
   end
 

@@ -5,6 +5,15 @@ module SurrealDB
     # Abstract base class for SurrealDB transport connections.
     # Subclasses must implement #connect, #close, and #execute.
     class Base
+      # Requests that must not trigger a token renewal: they authenticate the
+      # session themselves, or do not need it.
+      NO_RENEWAL = [
+        Protocol::Methods::SIGNIN, Protocol::Methods::SIGNUP, Protocol::Methods::AUTHENTICATE,
+        Protocol::Methods::INVALIDATE, Protocol::Methods::REFRESH, Protocol::Methods::REVOKE,
+        Protocol::Methods::RESET, Protocol::Methods::ATTACH, Protocol::Methods::DETACH,
+        Protocol::Methods::PING, Protocol::Methods::VERSION
+      ].freeze
+
       # @return [String] base URL
       attr_reader :url
 
@@ -18,6 +27,9 @@ module SurrealDB
         @connected = false
         @state_mutex = Mutex.new
         @session_states = { nil => SessionState.new }
+        @renew_tokens = options.fetch(:renew_tokens, true)
+        @token_refresh_margin = options.fetch(:token_refresh_margin, 60)
+        @renew_mutex = Mutex.new
       end
 
       # Opens the transport connection.
@@ -39,6 +51,7 @@ module SurrealDB
       # @param txn [Uuid, nil] transaction to run the request in
       # @return [Object] decoded result
       def send_request(method, params = [], session: nil, txn: nil)
+        renew_tokens(session) if @renew_tokens && !NO_RENEWAL.include?(method)
         result = execute(method, params, session: session, txn: txn)
         track_request(method, params, result, session)
         result
@@ -118,6 +131,28 @@ module SurrealDB
             @session_states[session]&.track(method, params, result)
           end
         end
+      end
+
+      # Renews a session's access token shortly before it expires, so the
+      # session does not silently lose its credentials: with the refresh
+      # token when there is one, otherwise by signing in again with the
+      # credentials it last signed in with.
+      def renew_tokens(session)
+        state = session_state(session)
+        return unless state&.expiring?(@token_refresh_margin) && state.renewable?
+
+        @renew_mutex.synchronize do
+          next unless state.expiring?(@token_refresh_margin) # another thread renewed it
+
+          log(:debug, 'Access token expiring; renewing it')
+          if state.refresh_token
+            send_request(Protocol::Methods::REFRESH, [state.tokens], session: session)
+          else
+            send_request(*state.signin, session: session)
+          end
+        end
+      rescue ServerError => e
+        log(:warn, "Could not renew the access token: #{e.message}")
       end
 
       def log(level, message)
