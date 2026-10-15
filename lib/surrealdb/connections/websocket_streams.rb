@@ -99,10 +99,19 @@ module SurrealDB
 
       # Asks the server to stop a stream the caller stopped reading. Its last
       # frames arrive after the stream is unregistered and are dropped.
+      #
+      # A server that refuses `query_cancel` (it is a capability of its own)
+      # cannot stop a stream, which then runs to the end with its frames
+      # dropped. Later queries on this connection run buffered instead, so
+      # there is never a stream to leave running.
       def cancel_stream(id)
         return unless @connected
 
         execute(Protocol::Methods::QUERY_CANCEL, [id], timeout: [@timeout, 5].min)
+      rescue ServerError => e
+        streaming_unavailable!
+        log(:warn, "The server refused to stop stream #{id} (#{e.message}); it runs on, and later queries " \
+                   'on this connection will not stream')
       rescue Error => e
         log(:debug, "query_cancel for stream #{id} failed: #{e.message}")
       end

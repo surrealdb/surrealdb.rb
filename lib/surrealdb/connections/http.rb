@@ -126,15 +126,18 @@ module SurrealDB
         req
       end
 
-      # A call's timeout bounds opening a new socket as well as the response.
+      # A call's timeout is one deadline for opening a new socket and reading
+      # the response: reading gets the time opening left (see #open_socket).
       def with_call_timeout(timeout)
         return yield if timeout.nil?
 
+        @call_deadline = monotonic_now + timeout
         @http.open_timeout = timeout
         @http.read_timeout = timeout
         begin
           yield
         ensure
+          @call_deadline = nil
           @http.open_timeout = @timeout
           @http.read_timeout = @timeout
         end
@@ -157,19 +160,20 @@ module SurrealDB
       end
 
       def transport(request, repeatable:, retried: false)
-        start_http unless @http.started?
+        open_socket
         reused = @requests_on_socket.positive?
         response = @http.request(request)
         @requests_on_socket += 1
         response
       rescue *STALE_CONNECTION_ERRORS => e
         drop_socket
-        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
+        # The request was written, on a fresh socket as much as on a reused one.
         unless repeatable
           raise RequestInterruptedError,
-                "HTTP keep-alive socket failed while the request was in flight (#{e.class}); " \
+                "HTTP connection failed while the request was in flight (#{e.class}); " \
                 'it was not sent again because it may already have run'
         end
+        raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}" if !reused || retried
 
         log(:debug, "HTTP keep-alive socket was stale (#{e.class}); retrying on a new one")
         transport(request, repeatable: true, retried: true)
@@ -179,6 +183,28 @@ module SurrealDB
       rescue Errno::ECONNREFUSED, SocketError, IOError, OpenSSL::SSL::SSLError => e
         drop_socket
         raise ConnectionError, "HTTP connection error: #{e.class}: #{e.message}"
+      end
+
+      # Opening a socket sends nothing, so a failure here means the request
+      # was never sent.
+      def open_socket
+        return if @http.started?
+
+        start_http
+        read_within_deadline
+      rescue Net::OpenTimeout => e
+        raise TimeoutError, "HTTP connect timed out: #{e.message}"
+      rescue SystemCallError, SocketError, IOError, OpenSSL::SSL::SSLError => e
+        raise NotConnectedError, "cannot open an HTTP connection: #{e.class}: #{e.message}"
+      end
+
+      def read_within_deadline
+        return unless @call_deadline
+
+        left = @call_deadline - monotonic_now
+        raise TimeoutError, 'HTTP request timed out while connecting' unless left.positive?
+
+        @http.read_timeout = left
       end
 
       def start_http

@@ -30,7 +30,7 @@ module SurrealDB
 
       # @return [Array, nil] the last signin call ([method, params]), kept so an
       #   expired session can sign in again
-      attr_reader :signin
+      attr_accessor :signin
 
       def initialize
         @namespace = nil
@@ -54,7 +54,7 @@ module SurrealDB
         when Protocol::Methods::SIGNUP
           @signin = nil # a new identity; the previous credentials are not its own
           store_tokens(result)
-        when Protocol::Methods::REFRESH then store_tokens(result)
+        when Protocol::Methods::REFRESH then refreshed(params[0], result)
         when Protocol::Methods::AUTHENTICATE then authenticated_with(params[0])
         when Protocol::Methods::REVOKE then forget_revoked(params[0])
         when Protocol::Methods::INVALIDATE then clear_auth
@@ -160,10 +160,11 @@ module SurrealDB
 
       # The value as it was sent: later changes to the caller's object must
       # not change what a fork or a replay sends.
-      def snapshot(value)
+      def snapshot(value) # rubocop:disable Metrics/CyclomaticComplexity
         case value
         when Hash then value.to_h { |k, v| [snapshot(k), snapshot(v)] }
         when Array then value.map { |v| snapshot(v) }
+        when Set then Set.new(value) { |v| snapshot(v) }
         when String then value.frozen? ? value : value.dup
         else value
         end
@@ -207,6 +208,13 @@ module SurrealDB
       # Re-presenting the current token (as a reconnect does) changes
       # nothing; a different token is a different identity, so the refresh
       # token and sign-in credentials of the previous one are dropped.
+      # Refreshing another identity's token pair switches to that identity,
+      # whose sign-in credentials are not the ones kept.
+      def refreshed(tokens, result)
+        @signin = nil unless tokens.is_a?(Hash) && tokens['access'] == @access_token
+        store_tokens(result)
+      end
+
       def authenticated_with(token)
         return if token == @access_token
 

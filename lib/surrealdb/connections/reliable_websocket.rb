@@ -195,6 +195,8 @@ module SurrealDB
       rescue RequestInterruptedError, AuthenticationError
         raise
       rescue ConnectionError => e
+        return kill_lost(params[0], deadline) if method == Protocol::Methods::KILL
+
         interrupted!(method, e, deadline) unless txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method)
         recover(deadline, method)
 
@@ -257,6 +259,20 @@ module SurrealDB
         when *TXN_FINISH
           @state_mutex.synchronize { @transactions.delete(params[0].to_s) }
         end
+      end
+
+      # A live query ends with the connection it was started on, so a kill
+      # the connection dropped under has done its job either way, as long as
+      # the reconnect does not start the live query again.
+      def kill_lost(id, deadline)
+        live = @state_mutex.synchronize { @lives.delete(id.to_s) }
+        @inner.remove_notification_handler(live[:current].to_s) if live
+        begin
+          recover(deadline, Protocol::Methods::KILL)
+        rescue TimeoutError
+          nil # the reconnect carries on in the background
+        end
+        nil
       end
 
       # The server ended the session's live queries (reset, detach); drop them and
