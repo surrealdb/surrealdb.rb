@@ -8,7 +8,7 @@ module SurrealDB
     # HTTP transport for SurrealDB RPC.
     #
     # Each request is a synchronous POST to /rpc with a CBOR body.
-    # Does not support live queries, sessions, or transactions.
+    # Does not support live queries, listing sessions, or transactions.
     #
     # ## Thread Safety
     #
@@ -44,6 +44,12 @@ module SurrealDB
         @connected = false
         @http = nil
         log(:debug, 'HTTP connection closed')
+      end
+
+      # The server refuses `sessions` over HTTP.
+      # @return [Boolean]
+      def supports_session_listing?
+        false
       end
 
       protected

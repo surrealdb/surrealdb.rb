@@ -60,6 +60,13 @@ module SurrealDB
         true
       end
 
+      # Whether the server answers `sessions` (listing attached sessions) on
+      # this connection.
+      # @return [Boolean]
+      def supports_session_listing?
+        true
+      end
+
       # What the client has told a session so far.
       # @param session [Uuid, nil] nil for the default session
       # @return [SessionState, nil]

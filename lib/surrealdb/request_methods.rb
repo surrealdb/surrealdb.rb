@@ -218,6 +218,29 @@ module SurrealDB
       rpc(Protocol::Methods::KILL, [live_query_id])
     end
 
+    # --- Transactions (WebSocket only) ---
+
+    # Begins a transaction in this session.
+    # @return [void]
+    def begin_transaction
+      require_transactions!
+      rpc(Protocol::Methods::BEGIN_TXN)
+    end
+
+    # Commits the current transaction.
+    # @return [void]
+    def commit
+      require_transactions!
+      rpc(Protocol::Methods::COMMIT)
+    end
+
+    # Cancels (rolls back) the current transaction.
+    # @return [void]
+    def cancel
+      require_transactions!
+      rpc(Protocol::Methods::CANCEL)
+    end
+
     # --- Info ---
 
     # Returns info about the current session.
@@ -260,6 +283,12 @@ module SurrealDB
               "expected a SurrealDB::RecordID, got #{record.inspect}. Strings are never parsed as record ids; " \
               'use SurrealDB::RecordID.parse or SurrealDB::StringRecordID'
       end
+    end
+
+    def require_transactions!
+      return if connection.supports_live_queries?
+
+      raise UnsupportedError, 'transactions require a WebSocket connection (ws:// or wss://)'
     end
 
     def require_live_queries!
