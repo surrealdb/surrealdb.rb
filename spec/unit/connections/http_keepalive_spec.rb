@@ -8,15 +8,29 @@ RSpec.describe SurrealDB::Connections::HTTP do
     described_class.new("http://127.0.0.1:#{server.port}", timeout: 2).tap(&:connect)
   end
 
-  it 'retries once on a fresh socket when the kept-alive one turns out to be dead' do
+  it 'retries a repeatable request once on a fresh socket when the kept-alive one is dead' do
     server = ScriptedHTTPServer.new(%i[ok drop ok])
     http = http_to(server)
     Timeout.timeout(5) do
       expect(http.send_request('ping')).to eq('pong')
-      expect(http.send_request('query', ['CREATE person'])).to eq('pong')
+      expect(http.send_request('select', [SurrealDB::Table.new('person')])).to eq('pong')
     end
     expect(server.requests).to eq(3)
     expect(server.sockets).to eq(2)
+  ensure
+    http&.close
+    server&.close
+  end
+
+  it 'does not resend a write, which the server may already have run' do
+    server = ScriptedHTTPServer.new(%i[ok drop ok])
+    http = http_to(server)
+    Timeout.timeout(5) do
+      expect(http.send_request('ping')).to eq('pong')
+      expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::RequestInterruptedError)
+      expect(server.requests).to eq(2)
+      expect(http.send_request('ping')).to eq('pong')
+    end
   ensure
     http&.close
     server&.close
