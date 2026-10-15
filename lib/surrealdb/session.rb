@@ -58,6 +58,10 @@ module SurrealDB
 
     private
 
+    def request_session
+      @id
+    end
+
     # Called by {Client#detach} once the server has detached the session.
     def detached!
       @closed = true

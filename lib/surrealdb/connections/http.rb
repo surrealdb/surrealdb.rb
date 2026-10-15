@@ -47,6 +47,11 @@ module SurrealDB
         log(:debug, 'HTTP connection closed')
       end
 
+      # The server has no begin/commit/cancel over HTTP.
+      def supports_transactions?
+        false
+      end
+
       # The server refuses `sessions` over HTTP.
       # @return [Boolean]
       def supports_session_listing?
@@ -55,10 +60,10 @@ module SurrealDB
 
       protected
 
-      def execute(method, params, session: nil)
+      def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
 
-        _id, encoded = @rpc.encode_request(method, params, session: session)
+        _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
         request = build_request(encoded, session_state(session) || session_state)
         response = execute_request(request)

@@ -151,6 +151,10 @@ module SurrealDB
       @connection.send_request(method, params)
     end
 
+    def request_session
+      nil
+    end
+
     def restore_state(session, state)
       session.use(state.namespace, state.database) if state.namespace || state.database
       state.variables.each { |key, value| session.set(key, value) }

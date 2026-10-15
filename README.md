@@ -238,6 +238,33 @@ SurrealDB.connect("ws://localhost:8000") do |db|
 end
 ```
 
+## Transactions
+
+Interactive transactions run over WebSocket. Nothing written inside one is
+visible outside it until it commits.
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+  db.use("test", "test")
+
+  # Block form: commits when the block returns, cancels if it raises
+  db.begin_transaction do |tx|
+    tx.create(SurrealDB::RecordID.new("account", "a"), { "balance" => 100 })
+    tx.create(SurrealDB::RecordID.new("account", "b"), { "balance" => 0 })
+  end
+
+  # Or manage it yourself
+  tx = db.begin_transaction
+  tx.query("UPDATE account:a SET balance -= 10")
+  tx.query("UPDATE account:b SET balance += 10")
+  tx.commit # or tx.cancel
+
+  # Sessions have their own transactions
+  db.fork_session { |s| s.begin_transaction { |stx| stx.select("account") } }
+end
+```
+
 ## Embedded Database
 
 For in-process usage without a separate server, install the embedded gem:

@@ -36,6 +36,20 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
       expect(call_count).to eq(2)
     end
 
+    it 'does not send a transaction request, or its commit, again on the new connection' do
+      txn = SurrealDB::Uuid.v4
+      [['query', ['UPDATE x'], { txn: txn }], ['commit', [txn], {}]].each do |method, params, options|
+        calls = 0
+        allow(inner).to receive(:send_request) do |sent, *|
+          calls += 1 if sent == method
+          raise SurrealDB::ConnectionError, 'disconnected'
+        end
+        expect { reliable.send_request(method, params, **options) }
+          .to raise_error(SurrealDB::ConnectionError, /transaction ended with the connection/)
+        expect(calls).to eq(1)
+      end
+    end
+
     it 'raises after exhausting retries' do
       allow(inner).to receive(:send_request).and_raise(SurrealDB::ConnectionError, 'disconnected')
       allow(inner).to receive(:close)
@@ -65,7 +79,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('use', %w[ns db], session: nil).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('use', %w[ns db], any_args).at_least(:twice)
     end
 
     it 'replays let variables after reconnect' do
@@ -83,7 +97,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('let', %w[key value], session: nil).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('let', %w[key value], any_args).at_least(:twice)
     end
   end
 
@@ -95,7 +109,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     it 'attaches them again with their state before retrying a request made in one' do
       dropped = false
       allow(inner).to receive_messages(connect: nil, close: nil)
-      allow(inner).to receive(:execute) do |method, params, session: nil|
+      allow(inner).to receive(:execute) do |method, params, session: nil, **|
         sent << [method, params, session]
         if method == 'select' && !dropped
           dropped = true
@@ -118,7 +132,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
     it 'signs them in again with the credentials they signed in with, not their token, which may have expired' do
       dropped = false
       allow(inner).to receive_messages(connect: nil, close: nil)
-      allow(inner).to receive(:execute) do |method, params, session: nil|
+      allow(inner).to receive(:execute) do |method, params, session: nil, **|
         sent << [method, params, session]
         if method == 'select' && !dropped
           dropped = true
