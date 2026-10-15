@@ -239,11 +239,11 @@ module SurrealDB
     # @raise [ImportError] if any statement failed
     # @raise [ServerError] if the server refused the import
     def import(content)
-      response = connection.http_endpoint.request(
+      response = connection.http_request(
         :post, '/import',
+        session: request_session,
         body: content,
-        headers: { 'Content-Type' => 'text/plain', 'Accept' => 'application/cbor' },
-        state: connection.session_state(request_session)
+        headers: { 'Content-Type' => 'text/plain', 'Accept' => 'application/cbor' }
       )
       raise_import_failures(response)
       nil
@@ -268,10 +268,9 @@ module SurrealDB
                               [:post, ::CBOR.encode(CBOR::Encoder.prepare(options.transform_keys(&:to_s))),
                                { 'Content-Type' => 'application/cbor' }]
                             end
-      response = connection.http_endpoint.request(
+      response = connection.http_request(
         verb, '/export',
-        body: body, headers: headers.merge('Accept' => 'text/plain'),
-        state: connection.session_state(request_session), &block
+        session: request_session, body: body, headers: headers.merge('Accept' => 'text/plain'), &block
       )
       Connections::HTTPEndpoint.raise_for(response, 'export') unless response.is_a?(Net::HTTPSuccess)
       block ? nil : response.body.to_s.dup.force_encoding(Encoding::UTF_8)

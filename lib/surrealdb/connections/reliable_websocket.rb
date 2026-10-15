@@ -83,6 +83,10 @@ module SurrealDB
         @inner.http_endpoint
       end
 
+      def http_request(...)
+        @inner.http_request(...)
+      end
+
       def health
         @inner.health
       end
