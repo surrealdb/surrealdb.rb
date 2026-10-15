@@ -35,9 +35,10 @@ module SurrealDB
       CANCEL          = 'cancel'
 
       # Methods that can be sent again without changing anything when it is
-      # not known whether the first attempt ran.
+      # not known whether the first attempt ran. (Not DETACH: run twice, the
+      # second finds no session and fails.)
       SAFE_TO_REPEAT = [
-        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS, DETACH
+        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS
       ].freeze
     end
   end

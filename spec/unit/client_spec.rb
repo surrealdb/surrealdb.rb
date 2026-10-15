@@ -303,3 +303,28 @@ RSpec.describe SurrealDB::Client do
     end
   end
 end
+
+RSpec.describe SurrealDB::Client, '#import' do
+  let(:connection) { instance_double(SurrealDB::Connections::WebSocket) }
+  let(:client) { described_class.new('ws://localhost:8000') }
+
+  before { client.instance_variable_set(:@connection, connection) }
+
+  def answer(code, body)
+    klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)
+    klass.new('1.1', code.to_s, '').tap do |response|
+      response.instance_variable_set(:@body, body)
+      response.instance_variable_set(:@read, true)
+    end
+  end
+
+  it 'raises when a successful import answers with something it cannot read' do
+    allow(connection).to receive(:http_request).and_return(answer(200, 'not cbor'))
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /import's result/)
+  end
+
+  it 'is fine with a successful import that reports no failures' do
+    allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode([])))
+    expect(client.import("OPTION IMPORT;\nCREATE x;")).to be_nil
+  end
+end
