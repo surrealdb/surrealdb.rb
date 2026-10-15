@@ -12,16 +12,22 @@ module SurrealDB
 
       # Encodes an RPC request to CBOR bytes.
       #
+      # The envelope is `{id, method, params, session?}`. `session` is only
+      # present when the request targets an attached session; without it the
+      # server uses the connection's default session.
+      #
       # @param method [String] RPC method name
       # @param params [Array] method parameters
+      # @param session [Uuid, nil] attached session to run the request in
       # @return [Array(Integer, String)] request ID and encoded CBOR bytes
-      def encode_request(method, params = [])
+      def encode_request(method, params = [], session: nil)
         id = next_id
         payload = {
           'id' => id,
           'method' => method,
           'params' => CBOR::Encoder.prepare(params)
         }
+        payload['session'] = CBOR::Encoder.prepare(session) if session
         [id, ::CBOR.encode(payload)]
       end
 

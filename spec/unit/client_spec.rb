@@ -46,10 +46,6 @@ RSpec.describe SurrealDB::Client do
   describe 'session/transaction gating' do
     let(:client) { described_class.new('http://localhost:8000') }
 
-    it 'raises UnsupportedError for #attach on HTTP' do
-      expect { client.attach }.to raise_error(SurrealDB::UnsupportedError, /sessions/)
-    end
-
     it 'raises UnsupportedError for #begin_transaction on HTTP' do
       expect { client.begin_transaction }.to raise_error(SurrealDB::UnsupportedError, /transactions/)
     end
@@ -127,6 +123,49 @@ RSpec.describe SurrealDB::Client do
 
     it 'refuses string relate endpoints' do
       expect { client.relate('person:alice', 'knows', rid) }.to raise_error(ArgumentError, /RecordID/)
+    end
+  end
+
+  describe 'sessions' do
+    let(:connection) do
+      instance_double(SurrealDB::Connections::WebSocket, supports_live_queries?: true, supports_sessions?: true)
+    end
+    let(:client) { described_class.new('ws://localhost:8000') }
+
+    before do
+      client.instance_variable_set(:@connection, connection)
+      allow(connection).to receive(:send_request)
+    end
+
+    it 'attaches with a fresh client-generated id in the envelope' do
+      session = client.new_session
+      expect(session.id).to be_a(SurrealDB::Uuid)
+      expect(connection).to have_received(:send_request).with('attach', [], session: session.id)
+    end
+
+    it 'runs requests made through the session in that session' do
+      session = client.new_session
+      session.select('person')
+      expect(connection).to have_received(:send_request)
+        .with('select', [SurrealDB::Table.new('person')], session: session.id)
+    end
+
+    it 'detaches by id and refuses further use' do
+      session = client.new_session
+      session.close
+      expect(connection).to have_received(:send_request).with('detach', [], session: session.id)
+      expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    end
+
+    it 'detaches when the block form returns, even on error' do
+      captured = nil
+      expect do
+        client.new_session do |s|
+          captured = s
+          raise 'boom'
+        end
+      end.to raise_error('boom')
+      expect(captured).to be_closed
     end
   end
 

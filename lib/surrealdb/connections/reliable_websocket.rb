@@ -48,14 +48,22 @@ module SurrealDB
         true
       end
 
-      def send_request(method, params = [])
-        track_state(method, params)
-        @inner.send_request(method, params)
+      def send_request(method, params = [], session: nil)
+        track_state(method, params) if session.nil?
+        @inner.send_request(method, params, session: session)
       rescue ConnectionError => e
         reconnect!
         log(:info, "Reconnected after: #{e.message}")
         replay_state
-        @inner.send_request(method, params)
+        @inner.send_request(method, params, session: session)
+      end
+
+      def session_state(session = nil)
+        @inner.session_state(session)
+      end
+
+      def attached_sessions
+        @inner.attached_sessions
       end
 
       def on_notification(live_query_id, handler)
@@ -129,16 +137,16 @@ module SurrealDB
 
         if auth_method && auth_params
           case auth_method
-          when :signin then @inner.send_request(Protocol::Methods::SIGNIN, auth_params)
-          when :signup       then @inner.send_request(Protocol::Methods::SIGNUP, auth_params)
-          when :authenticate then @inner.send_request(Protocol::Methods::AUTHENTICATE, auth_params)
+          when :signin then @inner.send_request(Protocol::Methods::SIGNIN, auth_params, session: nil)
+          when :signup       then @inner.send_request(Protocol::Methods::SIGNUP, auth_params, session: nil)
+          when :authenticate then @inner.send_request(Protocol::Methods::AUTHENTICATE, auth_params, session: nil)
           end
         end
 
-        @inner.send_request(Protocol::Methods::USE, [ns, db]) if ns && db
+        @inner.send_request(Protocol::Methods::USE, [ns, db], session: nil) if ns && db
 
         vars.each do |key, value|
-          @inner.send_request(Protocol::Methods::LET, [key, value])
+          @inner.send_request(Protocol::Methods::LET, [key, value], session: nil)
         end
 
         live_subs.each do |live_id, handler|

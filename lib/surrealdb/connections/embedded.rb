@@ -54,23 +54,6 @@ module SurrealDB
         log(:debug, 'Embedded connection closed')
       end
 
-      def send_request(method, params = [])
-        raise ConnectionError, 'not connected' unless @connected
-
-        _id, encoded = @rpc.encode_request(method, params)
-
-        err_ptr = FFI::MemoryPointer.new(:pointer)
-        res_ptr = FFI::MemoryPointer.new(:pointer)
-
-        ret = Native.sr_surreal_rpc_execute(
-          @rpc_ptr, err_ptr, res_ptr,
-          encoded, encoded.bytesize
-        )
-        check_error!(ret, err_ptr)
-
-        read_and_free_response(res_ptr, ret)
-      end
-
       def supports_live_queries?
         true
       end
@@ -84,6 +67,25 @@ module SurrealDB
       # @param live_query_id [String]
       def remove_notification_handler(live_query_id)
         @mutex.synchronize { @live_handlers.delete(live_query_id) }
+      end
+
+      protected
+
+      def execute(method, params, session: nil)
+        raise ConnectionError, 'not connected' unless @connected
+
+        _id, encoded = @rpc.encode_request(method, params, session: session)
+
+        err_ptr = FFI::MemoryPointer.new(:pointer)
+        res_ptr = FFI::MemoryPointer.new(:pointer)
+
+        ret = Native.sr_surreal_rpc_execute(
+          @rpc_ptr, err_ptr, res_ptr,
+          encoded, encoded.bytesize
+        )
+        check_error!(ret, err_ptr)
+
+        read_and_free_response(res_ptr, ret)
       end
 
       private
@@ -172,10 +174,6 @@ module SurrealDB
         @notification_thread&.join(2)
         @notification_thread&.kill if @notification_thread&.alive?
         @notification_thread = nil
-      end
-
-      def log(level, message)
-        SurrealDB.configuration.logger&.send(level, message)
       end
     end
   end

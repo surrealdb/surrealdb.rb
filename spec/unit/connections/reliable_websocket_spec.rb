@@ -64,7 +64,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('use', %w[ns db]).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('use', %w[ns db], session: nil).at_least(:twice)
     end
 
     it 'replays let variables after reconnect' do
@@ -82,7 +82,7 @@ RSpec.describe SurrealDB::Connections::ReliableWebSocket do
 
       reliable.send_request('query', ['SELECT 1'])
 
-      expect(inner).to have_received(:send_request).with('let', %w[key value]).at_least(:twice)
+      expect(inner).to have_received(:send_request).with('let', %w[key value], session: nil).at_least(:twice)
     end
   end
 

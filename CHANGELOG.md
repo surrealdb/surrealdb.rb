@@ -11,13 +11,23 @@
 - UUIDs decoded to `String` and were never encoded, so uuid-keyed record ids and uuid
   parameters did not survive a round trip. They are now `SurrealDB::Uuid` (tag 37).
 
+- Sessions were unusable: `attach` sent no session id and the request envelope had no
+  `session` field, so every request ran in the default session.
+
 ### Added
 
+- Sessions as objects: `Client#new_session` (alias `attach`) returns a `SurrealDB::Session`
+  that supports every request method and runs them in its own server session.
+  `Client#fork_session` / `Session#fork_session` copy namespace, database, variables and
+  credentials. `Client#sessions` lists attached sessions. Sessions work over HTTP as well as
+  WebSocket.
 - `SurrealDB::Uuid` (with `.parse`, `.v4`, `.v7`), `SurrealDB::FileRef` (tag 55) and Ruby
   `Set` support (tag 56), plus decoding of RFC 3339 datetime strings (tag 0).
 
 ### Changed
 
+- **Breaking:** `Client#attach` returns a `Session` instead of the raw server result, and
+  `Client#detach` takes a `Session` (or its id).
 - **Breaking:** UUID values, including live query ids, decode to `SurrealDB::Uuid` instead
   of `String`. Use `#to_s` for the text form.
 - **Breaking:** a String target is always a table name. Strings containing `:` raise
