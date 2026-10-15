@@ -42,6 +42,17 @@ module SurrealDB
   # Raised when a committed or cancelled transaction is used.
   class TransactionError < Error; end
 
+  # Raised by {ApiResponse#value} for a response outside 2xx.
+  class ApiError < Error
+    # @return [ApiResponse]
+    attr_reader :response
+
+    def initialize(method, path, response)
+      @response = response
+      super("#{method.to_s.upcase} #{path} answered #{response.status}: #{response.body.inspect}")
+    end
+  end
+
   # A session's credentials expired, or were lost with the connection, and
   # could not be renewed. The request was not sent, rather than running it
   # without the identity the caller expects.

@@ -761,3 +761,75 @@ RSpec.shared_examples 'query streaming' do
     session&.close
   end
 end
+
+RSpec.shared_examples 'gql and user-defined APIs' do
+  let(:database) { unique_table('api') }
+
+  after { client.close }
+
+  before do
+    client.use(SurrealHelper::SURREAL_NS, database)
+    client.query(<<~SQL)
+      DEFINE API OVERWRITE "/greet/:name" FOR get, post THEN {
+        RETURN {
+          status: 201,
+          headers: { "x-name": $request.params.name },
+          body: { hello: $request.params.name, method: $request.method, sent: $request.body,
+                  q: $request.query, tenant: $request.headers["x-tenant"] }
+        }
+      };
+      UPSERT person:ann SET name = 'Ann', age = 31;
+      UPSERT person:bob SET name = 'Bob', age = 25;
+    SQL
+  end
+
+  def server_older_than?(version)
+    SurrealDB::ServerVersion.parse(client.server_version) < Gem::Version.new(version)
+  end
+
+  it 'invokes an endpoint with its method, body, query, headers and prefix' do
+    api = client.api('/greet').header('x-tenant', 'acme')
+    response = api.post('/ann', { 'a' => 1 }, query: { 'k' => 'v' })
+
+    expect(response.status).to eq(201)
+    expect(response).to be_success
+    expect(response.headers).to include('x-name' => 'ann')
+    expect(response.value).to eq('hello' => 'ann', 'method' => 'post', 'sent' => { 'a' => 1 },
+                                 'q' => { 'k' => 'v' }, 'tenant' => 'acme')
+    expect(api.get('/bob').value).to include('hello' => 'bob', 'method' => 'get')
+  end
+
+  it 'reports an unsuccessful response, raising only when asked for the value' do
+    response = client.api.get('/nowhere')
+    expect(response.status).to eq(404)
+    expect(response).not_to be_success
+    expect { response.value }.to raise_error(SurrealDB::ApiError, %r{GET /nowhere answered 404})
+  end
+
+  it 'runs GQL queries with variables, or says the server cannot' do
+    query = 'MATCH (p:person) WHERE p.age > $min RETURN p.name AS name'
+    if server_older_than?('3.2.0')
+      expect { client.gql(query) }.to raise_error(SurrealDB::UnsupportedError, /GQL/)
+    elsif server_older_than?('3.3.0') && !gql_enabled_on_3_2?
+      expect { client.gql(query) }.to raise_error(SurrealDB::NotAllowedError, /Experimental capability `gql`/)
+    else
+      expect(client.gql(query, { 'min' => 30 })).to eq([[{ 'name' => 'Ann' }]])
+      expect { client.gql('MATCH (p:person RETURN') }.to raise_error(SurrealDB::ValidationError)
+    end
+  end
+
+  it 'gives GQL the variables set on the connection' do
+    skip 'needs GQL' if server_older_than?('3.2.0') || (server_older_than?('3.3.0') && !gql_enabled_on_3_2?)
+
+    client.set('min', 30)
+    expect(client.gql('MATCH (p:person) WHERE p.age > $min RETURN p.name AS name')).to eq([[{ 'name' => 'Ann' }]])
+  end
+
+  # GQL on 3.2 is behind the experimental `gql` capability.
+  def gql_enabled_on_3_2?
+    client.gql('MATCH (p:person) RETURN p.name AS name')
+    true
+  rescue SurrealDB::NotAllowedError
+    false
+  end
+end

@@ -75,7 +75,7 @@ module SurrealDB
       protected
 
       # Methods that take query variables as their second param.
-      VARIABLE_METHODS = [Protocol::Methods::QUERY].freeze
+      VARIABLE_METHODS = [Protocol::Methods::QUERY, Protocol::Methods::GQL].freeze
 
       # Methods that carry their own credentials in the body. They are sent
       # without the bearer header: when the current access token has expired,

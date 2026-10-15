@@ -267,6 +267,35 @@ Streaming needs a WebSocket connection and SurrealDB 3.3 or later; elsewhere the
 runs buffered and yields the same chunks. As with `query`, a failed statement's error is
 raised once the stream ends, and rows it sent before failing are not valid.
 
+## GQL and User-defined APIs
+
+```ruby
+SurrealDB.connect("ws://localhost:8000") do |db|
+  db.signin("user" => "root", "pass" => "root")
+  db.use("test", "test")
+  db.query(<<~SQL)
+    UPSERT person:ann SET name = 'Ann', age = 31;
+    DEFINE API OVERWRITE "/people/:id" FOR get THEN {
+      RETURN { status: 200, body: (SELECT * FROM ONLY type::record('person', $request.params.id)) }
+    };
+  SQL
+
+  # ISO GQL: one result per statement, like query. Needs SurrealDB 3.3, or 3.2
+  # started with --allow-experimental gql (NotAllowedError otherwise).
+  begin
+    names, = db.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name", { "min" => 30 })
+  rescue SurrealDB::UnsupportedError
+    # the server has no GQL support (before SurrealDB 3.2)
+  end
+
+  # User-defined APIs, through api::invoke in this session
+  people = db.api("/people")
+  people.header("x-tenant", "acme")
+  response = people.get("/ann") # => SurrealDB::ApiResponse (status, headers, body)
+  response.value                # the body; raises SurrealDB::ApiError unless the status is 2xx
+end
+```
+
 ## Structured Query Results
 
 Use `query_raw` to get per-statement metadata (status, timing, errors) for multi-statement queries:
