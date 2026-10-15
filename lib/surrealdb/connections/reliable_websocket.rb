@@ -160,6 +160,22 @@ module SurrealDB
         live_subs.each do |live_id, handler|
           @inner.on_notification(live_id, handler)
         end
+        replay_sessions
+      end
+
+      # The new connection has none of the attached sessions: attach each
+      # again under its id and restore its state, so a retried request made
+      # through a Session finds it.
+      def replay_sessions
+        @inner.attached_sessions.to_a.each do |id, state|
+          state = state.copy
+          @inner.send_request(Protocol::Methods::ATTACH, [], session: id)
+          @inner.send_request(Protocol::Methods::AUTHENTICATE, [state.access_token], session: id) if state.access_token
+          if state.namespace || state.database
+            @inner.send_request(Protocol::Methods::USE, [state.namespace, state.database], session: id)
+          end
+          state.variables.each { |key, value| @inner.send_request(Protocol::Methods::LET, [key, value], session: id) }
+        end
       end
 
       def log(level, message)

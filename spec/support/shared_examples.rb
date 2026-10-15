@@ -111,7 +111,12 @@ RSpec.shared_examples 'CRUD operations' do
     client.create(rid('d2'), { 'name' => 'Alice' })
     client.create(rid('d3'), { 'name' => 'Bob' })
     client.delete(table)
-    expect(client.select(table)).to eq([])
+    remaining = begin
+      client.select(table)
+    rescue SurrealDB::NotFoundError # SurrealDB 3.0 may answer this for an emptied table
+      []
+    end
+    expect(remaining).to eq([])
   end
 
   it 'relates two records' do
@@ -380,6 +385,16 @@ RSpec.shared_examples 'import and export' do
     chunks = []
     expect(client.export { |chunk| chunks << chunk }).to be_nil
     expect(chunks.join).to include('Streamy')
+  end
+
+  it 'passes on an error the export block raises, not as a connection error' do
+    expect { client.export { |_chunk| raise Errno::ENOSPC } }.to raise_error(Errno::ENOSPC)
+  end
+
+  it 'refuses import and export once the client is closed' do
+    client.close
+    expect { client.export }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
   end
 
   it 'round-trips an export through an import' do
