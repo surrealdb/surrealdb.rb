@@ -41,7 +41,10 @@ module SurrealDB
       def request(verb, path, body: nil, headers: {}, state: nil, timeout: nil, &block) # rubocop:disable Metrics/ParameterLists
         req = build(verb, path, body, headers, state)
         block &&= guard(block)
-        net_http(timeout || @timeout).start do |conn|
+        timeout ||= @timeout
+        deadline = monotonic_now + timeout
+        net_http(timeout).start do |conn|
+          sending_within(conn, deadline, path)
           conn.request(req) do |response|
             if block && response.is_a?(Net::HTTPSuccess)
               response.read_body(&block)
@@ -61,9 +64,11 @@ module SurrealDB
         raise ProtocolError, "HTTP #{path} got a malformed response: #{e.message}"
       end
 
-      # An error the caller's block raised while reading a streamed body. It
-      # is carried past the transport rescues and re-raised unchanged, so a
-      # local failure (a full disk, say) is not reported as a network one.
+      # An error the caller's block raised while reading a streamed body, or
+      # the caller's IO raised while it was read for the request body. It is
+      # carried past the transport rescues and re-raised unchanged, so a
+      # local failure (a full disk, an unreadable file) is not reported as a
+      # network one, which a caller might retry.
       class BlockError < StandardError
         # @return [Exception]
         attr_reader :original
@@ -71,6 +76,20 @@ module SurrealDB
         def initialize(original)
           @original = original
           super(original.message)
+        end
+      end
+
+      # The caller's IO, as the request body: its own errors are wrapped in
+      # a {BlockError} so they reach the caller as they were raised.
+      class GuardedBody
+        def initialize(source)
+          @io = source
+        end
+
+        def read(*)
+          @io.read(*)
+        rescue StandardError => e
+          raise BlockError, e
         end
       end
 
@@ -101,6 +120,20 @@ module SurrealDB
 
       private
 
+      # Opening the connection used part of the time; writing the request and
+      # reading the answer get what is left.
+      def sending_within(conn, deadline, path)
+        left = deadline - monotonic_now
+        raise TimeoutError.new("HTTP #{path} timed out while connecting", sent: false) unless left.positive?
+
+        conn.write_timeout = left
+        conn.read_timeout = left
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
       def net_http(timeout)
         Net::HTTP.new(@base.host, @base.port).tap do |http|
           http.use_ssl = @base.scheme == 'https'
@@ -127,7 +160,7 @@ module SurrealDB
 
       def attach_body(req, body)
         if body.respond_to?(:read)
-          req.body_stream = body
+          req.body_stream = GuardedBody.new(body)
           req['Transfer-Encoding'] = 'chunked' unless req['Content-Length']
         elsif body
           req.body = body

@@ -22,6 +22,47 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
+  context 'when a kept-alive TLS socket ends without close_notify' do
+    let(:tls_eof) { OpenSSL::SSL::SSLError.new('SSL_read: unexpected eof while reading') }
+
+    def fail_second_request(http)
+      net = http.instance_variable_get(:@http)
+      calls = 0
+      allow(net).to receive(:request).and_wrap_original do |original, *args|
+        calls += 1
+        raise tls_eof if calls == 2
+
+        original.call(*args)
+      end
+    end
+
+    it 'retries a repeatable request on a fresh socket, as for any stale socket' do
+      server = ScriptedHTTPServer.new(%i[ok ok])
+      http = http_to(server)
+      fail_second_request(http)
+      Timeout.timeout(5) do
+        http.send_request('ping')
+        expect(http.send_request('select', [SurrealDB::Table.new('person')])).to eq('pong')
+      end
+    ensure
+      http&.close
+      server&.close
+    end
+
+    it 'reports a request that may have run as interrupted' do
+      server = ScriptedHTTPServer.new(%i[ok])
+      http = http_to(server)
+      fail_second_request(http)
+      Timeout.timeout(5) do
+        http.send_request('ping')
+        expect { http.send_request('query', ['CREATE person']) }.to raise_error(SurrealDB::RequestInterruptedError)
+      end
+    ensure
+      http&.close
+      server&.close
+    end
+  end
+
   it 'leaves reconnecting to the next request, so a failed one does not also wait for a new socket' do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
@@ -57,24 +98,24 @@ RSpec.describe SurrealDB::Connections::HTTP do
     server&.close
   end
 
-  it 'reads the response within the time opening the socket left, not a fresh timeout' do
+  it 'writes the request and reads the response within the time opening the socket left' do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
     net = http.instance_variable_get(:@http)
-    read_timeout = nil
+    seen = nil
     allow(net).to receive(:connect).and_wrap_original do |original|
       sleep 0.3
       original.call
     end
     allow(net).to receive(:request).and_wrap_original do |original, *args|
-      read_timeout = net.read_timeout
+      seen = [net.read_timeout, net.write_timeout]
       original.call(*args)
     end
     Timeout.timeout(5) do
       expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::ConnectionError)
       http.send_request('ping', timeout: 1)
     end
-    expect(read_timeout).to be_between(0.4, 0.7)
+    expect(seen).to all(be_between(0.4, 0.7))
   ensure
     http&.close
     server&.close

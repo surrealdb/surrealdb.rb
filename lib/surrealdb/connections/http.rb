@@ -19,7 +19,15 @@ module SurrealDB
     class HTTP < Base
       # Errors that mean the kept-alive socket was already dead: the server
       # closed it while idle, and the close raced our request.
-      STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED].freeze
+      # An HTTPS peer that closes the socket without a TLS close_notify makes
+      # OpenSSL raise this instead of EOFError.
+      module TLSEndOfFile
+        def self.===(error)
+          error.is_a?(OpenSSL::SSL::SSLError) && error.message.match?(/unexpected eof/i)
+        end
+      end
+
+      STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED, TLSEndOfFile].freeze
 
       def initialize(url, **options)
         super
@@ -46,6 +54,7 @@ module SurrealDB
       def close
         return unless @connected
 
+        detach_sessions
         @http&.finish if @http&.started?
         @connected = false
         @http = nil
@@ -108,6 +117,19 @@ module SurrealDB
         return params if variables.empty?
 
         [params[0], variables.merge(params[1] || {})]
+      end
+
+      # The server keeps an attached HTTP session until it is detached:
+      # unlike a WebSocket's, it does not end with the connection.
+      def detach_sessions
+        attached_sessions.each_key do |id|
+          send_request(Protocol::Methods::DETACH, [], session: id)
+        rescue ServerError => e
+          log(:debug, "Could not detach session #{id} on close: #{e.message}")
+        rescue Error => e
+          log(:debug, "Could not detach sessions on close: #{e.message}")
+          break # the server cannot be reached; the others would only wait as long
+        end
       end
 
       # Each HTTP request runs in a fresh server session unless it names an
@@ -212,6 +234,7 @@ module SurrealDB
         raise TimeoutError.new('HTTP request timed out while connecting', sent: false) unless left.positive?
 
         @http.read_timeout = left
+        @http.write_timeout = left
       end
 
       def start_http

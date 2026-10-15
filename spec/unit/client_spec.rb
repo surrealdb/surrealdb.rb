@@ -212,6 +212,16 @@ RSpec.describe SurrealDB::Client do
       allow(connection).to receive(:send_request).with('begin', []).and_return(txn_id)
     end
 
+    it 'is lost when its connection fails, and refuses further requests locally' do
+      allow(connection).to receive(:send_request).with('query', any_args)
+                                                 .and_raise(SurrealDB::ConnectionError, 'connection lost')
+      tx = client.begin_transaction
+      expect { tx.query('UPDATE person SET n += 1') }.to raise_error(SurrealDB::ConnectionError)
+      expect(tx).to be_lost
+      expect { tx.query('RETURN 1') }.to raise_error(SurrealDB::TransactionError, /lost/)
+      expect { tx.commit }.to raise_error(SurrealDB::TransactionError, /lost/)
+    end
+
     it 'begins a transaction and runs its requests with the txn id in the envelope' do
       tx = client.begin_transaction
       expect(tx.id).to eq(txn_id)
@@ -543,7 +553,7 @@ RSpec.describe SurrealDB::Client, '#import' do
   end
 
   it 'raises when a successful import answers with something other than statement results' do
-    [nil, 'ok', { 'status' => 'OK' }, [1]].each do |result|
+    [nil, 'ok', { 'status' => 'OK' }, [1], [{}], [{ 'status' => 'UNKNOWN' }]].each do |result|
       allow(connection).to receive(:http_request).and_return(answer(200, SurrealDB::CBOR::Encoder.encode(result)))
       expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ProtocolError, /not a list/)
     end
@@ -580,5 +590,32 @@ RSpec.describe SurrealDB::Client, '#fork_session' do
     state = connection.session_state(fork.id)
     expect(state.tokens).to eq({ 'access' => 'a1', 'refresh' => 'r1' })
     expect(state.signin).to eq(['signin', [{ 'user' => 'u', 'pass' => 'p' }]])
+  end
+end
+
+RSpec.describe SurrealDB::Connections::HTTP, '#close' do
+  let(:connection) { described_class.new('http://localhost:8000') }
+  let(:first) { SurrealDB::Uuid.v4 }
+  let(:second) { SurrealDB::Uuid.v4 }
+
+  before do
+    connection.instance_variable_set(:@connected, true)
+    allow(connection).to receive(:execute).and_return(nil)
+    connection.send_request('attach', [], session: first)
+    connection.send_request('attach', [], session: second)
+  end
+
+  it 'detaches the sessions still attached, which the server would otherwise keep' do
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: first))
+    expect(connection).to have_received(:execute).with('detach', [], hash_including(session: second))
+    expect(connection).not_to be_connected
+  end
+
+  it 'stops trying once the server cannot be reached' do
+    allow(connection).to receive(:execute).with('detach', any_args).and_raise(SurrealDB::ConnectionError, 'down')
+    connection.close
+    expect(connection).to have_received(:execute).with('detach', any_args).once
+    expect(connection).not_to be_connected
   end
 end
