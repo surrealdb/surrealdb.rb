@@ -174,8 +174,8 @@ module SurrealDB
     #
     # Without a block, returns the {Transaction}; call {Transaction#commit}
     # or {Transaction#cancel} when done. With a block, yields it, commits
-    # when the block returns and cancels if the block raises, and returns
-    # the block's value.
+    # when the block returns normally, and returns the block's value; if the
+    # block raises or leaves early (`return`, `break`, `throw`), cancels.
     #
     # @yield [Transaction] optional
     # @return [Transaction, Object]
@@ -197,9 +197,11 @@ module SurrealDB
     # Commits a transaction by object or id.
     # @param txn [Transaction, Uuid]
     # @return [void]
+    # @raise [UnsupportedError] on connections without transactions (HTTP)
     def commit(txn)
       return txn.commit if txn.is_a?(Transaction)
 
+      require_transactions!
       rpc(Protocol::Methods::COMMIT, [txn])
       nil
     end
@@ -207,9 +209,11 @@ module SurrealDB
     # Cancels a transaction by object or id.
     # @param txn [Transaction, Uuid]
     # @return [void]
+    # @raise [UnsupportedError] on connections without transactions (HTTP)
     def cancel(txn)
       return txn.cancel if txn.is_a?(Transaction)
 
+      require_transactions!
       rpc(Protocol::Methods::CANCEL, [txn])
       nil
     end
@@ -307,17 +311,21 @@ module SurrealDB
       []
     end
 
+    # Commits after the block returns normally. Anything else (an exception,
+    # or `return`/`break`/`throw` leaving the block) skips the commit, so the
+    # transaction is still open here and is cancelled.
     def run_transaction(txn)
       result = yield
       txn.commit
       result
-    rescue Exception # rubocop:disable Lint/RescueException
-      begin
-        txn.cancel if txn.open?
-      rescue Error => e
-        SurrealDB.configuration.logger&.warn("Failed to cancel transaction #{txn.id}: #{e.message}")
+    ensure
+      if txn.open?
+        begin
+          txn.cancel
+        rescue Error => e
+          SurrealDB.configuration.logger&.warn("Failed to cancel transaction #{txn.id}: #{e.message}")
+        end
       end
-      raise
     end
 
     def require_transactions!
