@@ -60,8 +60,19 @@ module SurrealDB
 
       protected
 
+      # Methods that take query variables as their second param.
+      VARIABLE_METHODS = [Protocol::Methods::QUERY].freeze
+
       def execute(method, params, session: nil, txn: nil)
         raise ConnectionError, 'not connected' unless @connected
+
+        # Without an attached session every HTTP request runs in a fresh server
+        # session, so a variable set with `let` would be gone by the next
+        # request. Keep variables on the client (Base#track_request records
+        # them) and send them with each query instead. `let` and `unset` are
+        # still sent, so the server refuses what it would refuse over
+        # WebSocket (a protected name such as `auth`) before it is recorded.
+        params = with_variables(method, params) if session.nil?
 
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
@@ -73,6 +84,15 @@ module SurrealDB
       end
 
       private
+
+      def with_variables(method, params)
+        return params unless VARIABLE_METHODS.include?(method)
+
+        variables = session_state.variables
+        return params if variables.empty?
+
+        [params[0], variables.merge(params[1] || {})]
+      end
 
       # The server keeps an attached HTTP session until it is detached:
       # unlike a WebSocket's, it does not end with the connection.

@@ -24,6 +24,9 @@
 - `QueryResult#error` was empty for failed statements; it now carries the server's message,
   with `kind`, `details` and `to_error`.
 
+- `set`/`let`/`unset` were silently lost over HTTP, where each request runs in a fresh
+  server session. The client now keeps the variables and sends them with every query.
+
 ### Added
 
 - Interactive transactions as objects: `begin_transaction` (on a `Client` or `Session`)

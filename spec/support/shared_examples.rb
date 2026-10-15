@@ -412,3 +412,49 @@ RSpec.shared_examples 'import and export' do
     expect(client.select(rid('rt'))).to include('name' => 'Round', 'tags' => %w[a b])
   end
 end
+
+RSpec.shared_examples 'session variables' do
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  it 'keeps a variable set with set/let for later queries' do
+    client.set('greeting', 'hello')
+    client.let('count', 3)
+    expect(value_of('RETURN $greeting')).to eq('hello')
+    expect(value_of('RETURN [$greeting, $count]')).to eq(['hello', 3])
+  end
+
+  it 'lets query variables override session variables for that query only' do
+    client.set('who', 'session')
+    expect(value_of('RETURN $who', { 'who' => 'query' })).to eq('query')
+    expect(value_of('RETURN $who')).to eq('session')
+  end
+
+  it 'forgets a variable after unset' do
+    client.set('temp', 1)
+    client.unset('temp')
+    expect(value_of('RETURN $temp')).to eq(SurrealDB::NONE)
+  end
+
+  it 'refuses a name the server protects, as it does over every transport' do
+    expect { client.set('auth', 1) }.to raise_error(SurrealDB::ServerError)
+    expect(value_of('RETURN $auth')).not_to eq(1)
+  end
+
+  it 'keeps the value as it was set, whatever the caller does to its object later' do
+    tags = ['a']
+    client.set('tags', tags)
+    tags << 'b'
+    expect(value_of('RETURN $tags')).to eq(['a'])
+  end
+
+  it 'keeps what a typed value held when it was set, too' do
+    id = ['a']
+    client.set('rid', SurrealDB::RecordID.new('user', id))
+    id << 'b'
+    expect(value_of('RETURN $rid')).to eq(SurrealDB::RecordID.new('user', ['a']))
+  end
+end
