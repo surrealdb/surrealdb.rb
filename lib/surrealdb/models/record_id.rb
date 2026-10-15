@@ -125,10 +125,20 @@ module SurrealDB
       def read_escape(str, pos)
         char = str[pos]
         if char == 'u' && str[pos + 1] == '{' && (close = str.index('}', pos + 2))
-          return [str[(pos + 2)...close].to_i(16).chr(Encoding::UTF_8), close + 1]
+          return [unicode_char(str[(pos + 2)...close]), close + 1]
         end
 
         [UNESCAPES.fetch(char, char), pos + 1]
+      end
+
+      # The character a \u{...} escape names: 1 to 6 hex digits giving a
+      # Unicode scalar value (not a surrogate).
+      def unicode_char(hex)
+        code = Integer(hex, 16) if hex.match?(/\A\h{1,6}\z/)
+        valid = code && code <= 0x10FFFF && !code.between?(0xD800, 0xDFFF)
+        raise ArgumentError, "invalid unicode escape \\u{#{hex}}" unless valid
+
+        code.chr(Encoding::UTF_8)
       end
 
       def try_numeric(str)
