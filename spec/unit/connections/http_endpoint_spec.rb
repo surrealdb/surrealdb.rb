@@ -12,6 +12,22 @@ RSpec.describe SurrealDB::Connections::HTTPEndpoint do
     expect(base_of('https://host/rpc/')).to eq('https://host')
   end
 
+  it 'connects to the default port of the scheme when the URL has none' do
+    ports = %w[wss://db.example.com https://db.example.com ws://db.example.com http://db.example.com wss://h:9443]
+            .map { |url| described_class.new(url, timeout: 1).base.port }
+    expect(ports).to eq([443, 443, 80, 80, 9443])
+  end
+
+  it 'opens HTTPS endpoints with TLS on port 443' do
+    http = instance_double(Net::HTTP, :use_ssl= => nil, :open_timeout= => nil, :read_timeout= => nil)
+    allow(Net::HTTP).to receive(:new).and_return(http)
+    allow(http).to receive(:start).and_raise(Errno::ECONNREFUSED)
+    endpoint = described_class.new('wss://db.example.com/rpc', timeout: 1)
+    expect { endpoint.request(:get, '/health') }.to raise_error(SurrealDB::ConnectionError)
+    expect(Net::HTTP).to have_received(:new).with('db.example.com', 443)
+    expect(http).to have_received(:use_ssl=).with(true)
+  end
+
   describe '.raise_for' do
     def response(code, body)
       klass = Net::HTTPResponse::CODE_TO_OBJ.fetch(code.to_s)
