@@ -75,6 +75,62 @@ RSpec.describe SurrealDB::CBOR::Encoder do
       expect(described_class.prepare(true)).to be(true)
       expect(described_class.prepare(nil)).to be_nil
     end
+
+    it 'accepts the whole signed 64-bit range' do
+      expect(described_class.prepare((2**63) - 1)).to eq((2**63) - 1)
+      expect(described_class.prepare(-(2**63))).to eq(-(2**63))
+    end
+
+    it 'refuses an integer outside 64 bits, which the server wraps (3.x) or refuses (4.0)' do
+      [2**63, (2**64) - 1, 2**64, -(2**63) - 1].each do |int|
+        expect { described_class.prepare(int) }.to raise_error(RangeError, /does not fit in 64 bits/)
+      end
+      expect { described_class.prepare({ 'a' => [2**63] }) }.to raise_error(RangeError)
+    end
+
+    it 'writes Symbol keys as the String keys they become' do
+      expect(described_class.prepare({ a: SurrealDB::NONE })).to eq({ 'a' => CBOR::Tagged.new(6, nil) })
+    end
+
+    it 'refuses a Symbol and a String key that name the same field' do
+      expect { described_class.prepare({ :a => 1, 'a' => 2 }) }.to raise_error(ArgumentError, /duplicate key "a"/)
+      expect { described_class.prepare([{ 'b' => { :c => 1, 'c' => 2 } }]) }.to raise_error(ArgumentError, /"c"/)
+    end
+  end
+
+  # SurrealDB 4.0 refuses the text forms of datetimes (tag 0), uuids (tag 9)
+  # and durations (tag 13); they are only ever read.
+  describe 'tags written' do
+    def tags_in(value)
+      raw = CBOR.decode(described_class.encode(value))
+      collect_tags(raw)
+    end
+
+    def collect_tags(node)
+      case node
+      when CBOR::Tagged then [node.tag] + collect_tags(node.value)
+      when Array then node.flat_map { |v| collect_tags(v) }
+      when Hash then node.values.flat_map { |v| collect_tags(v) }
+      else []
+      end
+    end
+
+    it 'writes a datetime as tag 12, a uuid as tag 37 and a duration as tag 14' do
+      expect(tags_in(Time.at(1_700_000_000, 5, :nsec))).to eq([12])
+      expect(tags_in(SurrealDB::Uuid.v4)).to eq([37])
+      expect(tags_in(SurrealDB::Duration.parse('1h30m'))).to eq([14])
+    end
+
+    it 'never writes tag 0, 9 or 13, however deeply a value is nested' do
+      value = { 'at' => [Time.now, { 'id' => SurrealDB::Uuid.v7 }],
+                'ids' => Set.new([SurrealDB::Uuid.v4]),
+                'range' => SurrealDB::Range.new(SurrealDB::BoundIncluded.new(Time.now),
+                                                SurrealDB::BoundExcluded.new(SurrealDB::Duration.parse('1s'))),
+                'record' => SurrealDB::RecordID.new('t', [Time.now, SurrealDB::Uuid.v4]) }
+      tags = tags_in(value)
+      expect(tags).to include(12, 14, 37)
+      expect(tags & [0, 9, 13]).to be_empty
+    end
   end
 
   describe '.encode' do

@@ -7,6 +7,10 @@ require 'time'
 module SurrealDB
   module CBOR
     module Encoder
+      # SurrealDB integers are 64-bit signed: the server wraps anything larger
+      # on 3.x and refuses it on 4.0, so it is never sent.
+      INT64_RANGE = (-(2**63)..((2**63) - 1))
+
       module_function
 
       # Encodes a Ruby object to CBOR bytes with SurrealDB custom tags.
@@ -61,12 +65,36 @@ module SurrealDB
           ::CBOR::Tagged.new(Tags::DATETIME_COMPACT, [obj.to_i, obj.nsec])
         when BigDecimal
           ::CBOR::Tagged.new(Tags::DECIMAL_STRING, obj.to_s('F'))
+        when Integer
+          prepare_integer(obj)
         when Hash
-          obj.transform_values { |v| prepare(v) }
+          prepare_hash(obj)
         when Array
           obj.map { |v| prepare(v) }
         else
           obj
+        end
+      end
+
+      # @raise [RangeError] outside the signed 64-bit range; send a BigDecimal
+      #   for a number that large
+      def prepare_integer(int)
+        return int if INT64_RANGE.cover?(int)
+
+        raise RangeError, "integer #{int} does not fit in 64 bits; use a BigDecimal to send a number that large"
+      end
+
+      # A Symbol key is written as text, so it must not repeat a String key:
+      # an object with two entries of one name is refused by SurrealDB 4.0.
+      # @raise [ArgumentError] when two keys are the same
+      def prepare_hash(hash)
+        hash.each_with_object({}) do |(key, value), out|
+          key = key.to_s if key.is_a?(Symbol)
+          if out.key?(key)
+            raise ArgumentError, "duplicate key #{key.inspect}: a Symbol and a String name the same field"
+          end
+
+          out[key] = prepare(value)
         end
       end
 
@@ -86,7 +114,7 @@ module SurrealDB
         rings
       end
 
-      private_class_method :prepare_bound, :encode_line_coords, :encode_polygon
+      private_class_method :prepare_integer, :prepare_hash, :prepare_bound, :encode_line_coords, :encode_polygon
     end
   end
 end

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- An integer outside the signed 64-bit range was sent as it was: SurrealDB 3.x wraps it
+  silently (`2**63` arrives as `-9223372036854775808`) and 4.0 refuses it. It now raises
+  `RangeError`; send a `BigDecimal` for a number that large. A Hash with a Symbol and a
+  String key of the same name, which 4.0 refuses as a duplicate map key, now raises
+  `ArgumentError`.
+
 - `authenticate` with a different token kept the previous identity's refresh token and
   sign-in credentials.
 - Over HTTP, `signin`, `signup`, `authenticate`, `refresh` and `revoke` sent the current
