@@ -43,6 +43,8 @@
   before any response arrives. One failed request no longer marks the HTTP client as
   permanently disconnected, and an HTTP 401 is reported as `NotAllowedError` with the
   server's message instead of a bare `ConnectionError`.
+  The socket is dropped after any error status, as a server that refuses a request without
+  reading its body can close the connection unannounced, which failed the next request on it.
 
 - Reconnection repeated requests that may already have run, and lost the rest of the
   session. A dropped request was retried whatever it was, so a `create` or `query` in flight

@@ -63,6 +63,19 @@ RSpec.describe SurrealDB::Connections::HTTP do
     end
   end
 
+  it 'does not reuse the socket after an error status, which the server may have closed unannounced' do
+    server = ScriptedHTTPServer.new(%i[refuse ok])
+    http = http_to(server)
+    Timeout.timeout(5) do
+      expect { http.send_request('query', ['RETURN 1']) }.to raise_error(SurrealDB::NotAllowedError)
+      expect(http.send_request('query', ['RETURN 1'])).to eq('pong')
+    end
+    expect(server.sockets).to eq(2)
+  ensure
+    http&.close
+    server&.close
+  end
+
   it 'leaves reconnecting to the next request, so a failed one does not also wait for a new socket' do
     server = ScriptedHTTPServer.new(%i[drop ok])
     http = http_to(server)
