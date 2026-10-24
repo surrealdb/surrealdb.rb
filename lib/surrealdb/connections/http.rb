@@ -148,7 +148,13 @@ module SurrealDB
       # is narrow.)
       def execute_request(request, repeatable:)
         response = transport(request, repeatable: repeatable)
-        HTTPEndpoint.raise_for(response, 'request') unless response.is_a?(Net::HTTPSuccess)
+        unless response.is_a?(Net::HTTPSuccess)
+          # A server that refuses a request without reading its body (a 401,
+          # say) may close the connection without saying so, which would fail
+          # the next request on it as if it were in flight.
+          drop_socket
+          HTTPEndpoint.raise_for(response, 'request')
+        end
 
         response
       end
