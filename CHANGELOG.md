@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Decoding a duration the server sends in short compact form (`0s` as `[]`, whole seconds as `[secs]`) no longer raises
+
 ## [0.7.0] - 2026-04-01
 
 ### Added
