@@ -258,6 +258,66 @@ RSpec.shared_examples 'value round-trips' do
   end
 end
 
+RSpec.shared_examples 'sized numbers' do
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  def server_major
+    client.version[/\d+/].to_i
+  end
+
+  def require_cbor2!
+    skip "the server did not negotiate cbor.2 (#{client.version})" unless client.cbor_format == :cbor2
+  end
+
+  it 'speaks cbor.2 with SurrealDB 4.0 and plain cbor with older servers' do
+    expect(client.cbor_format).to eq(server_major >= 4 ? :cbor2 : :cbor)
+  end
+
+  it 'sends a sized number widened over plain cbor' do
+    skip 'the connection speaks cbor.2' if client.cbor_format == :cbor2
+
+    vars = { 'small' => SurrealDB::SizedNumber.u8(5), 'big' => SurrealDB::SizedNumber.u64((2**64) - 1),
+             'float' => SurrealDB::SizedNumber.f32(1.5) }
+    expect(value_of('RETURN [$small, $big, $float]', vars)).to eq([5, BigDecimal('18446744073709551615'), 1.5])
+  end
+
+  it 'round-trips every sized kind over cbor.2' do
+    require_cbor2!
+
+    numbers = [SurrealDB::SizedNumber.i8(-128), SurrealDB::SizedNumber.u8(255), SurrealDB::SizedNumber.i16(-3),
+               SurrealDB::SizedNumber.u16(65_535), SurrealDB::SizedNumber.i32(-2**31),
+               SurrealDB::SizedNumber.u32((2**32) - 1), SurrealDB::SizedNumber.u64((2**64) - 1),
+               SurrealDB::SizedNumber.f16(1.5), SurrealDB::SizedNumber.f32(0.1)]
+    expect(value_of('RETURN $n', { 'n' => numbers })).to eq(numbers)
+    expect(value_of('RETURN $n.map(|$x| type::of($x))', { 'n' => numbers })).to eq(
+      %w[i8 u8 i16 u16 i32 u32 u64 f16 f32]
+    )
+  end
+
+  it 'decodes the sized numbers the server returns over cbor.2' do
+    require_cbor2!
+
+    expect(value_of('RETURN [5u8, -3i16, 18446744073709551615u64, 1.5f32, 5]')).to eq(
+      [SurrealDB::SizedNumber.u8(5), SurrealDB::SizedNumber.i16(-3), SurrealDB::SizedNumber.u64((2**64) - 1),
+       SurrealDB::SizedNumber.f32(1.5), 5]
+    )
+  end
+
+  it 'reports a value outside a sized field as a server error over cbor.2' do
+    require_cbor2!
+
+    table = unique_table('sized')
+    client.query("DEFINE FIELD n ON #{table} TYPE u8")
+    expect { client.query("CREATE #{table}:one SET n = $n", { 'n' => 300 }) }.to raise_error(SurrealDB::ServerError)
+    created = client.query("CREATE #{table}:two SET n = $n RETURN VALUE n", { 'n' => SurrealDB::SizedNumber.u8(200) })
+    expect(created.flatten).to eq([SurrealDB::SizedNumber.u8(200)])
+  end
+end
+
 RSpec.shared_examples 'sessions' do
   after { client.close }
 

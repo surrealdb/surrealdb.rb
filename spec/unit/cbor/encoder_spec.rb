@@ -140,4 +140,36 @@ RSpec.describe SurrealDB::CBOR::Encoder do
       expect(result.encoding).to eq(Encoding::BINARY)
     end
   end
+
+  describe 'sized numbers' do
+    def hex(value, cbor2:)
+      described_class.encode(value, cbor2: cbor2).unpack1('H*')
+    end
+
+    it 'tags each kind over cbor.2' do
+      expect(hex(SurrealDB::SizedNumber.u8(5), cbor2: true)).to eq('d8b505')
+      expect(hex(SurrealDB::SizedNumber.i8(-128), cbor2: true)).to eq('d8b4387f')
+      expect(hex(SurrealDB::SizedNumber.u64((2**64) - 1), cbor2: true)).to eq('d8ba1bffffffffffffffff')
+      expect(hex(SurrealDB::SizedNumber.f16(1.5), cbor2: true)).to eq('d8bbf93e00')
+      expect(hex(SurrealDB::SizedNumber.f32(0.1), cbor2: true)).to eq('d8bcfa3dcccccd')
+    end
+
+    it 'keeps tags inside arrays, objects and record ids' do
+      value = { 'a' => [SurrealDB::SizedNumber.i8(1)],
+                'r' => SurrealDB::RecordID.new('t', [SurrealDB::SizedNumber.u8(5)]) }
+      expect(hex(value, cbor2: true)).to eq('a2616181d8b4016172c882617481d8b505')
+    end
+
+    it 'widens over plain cbor, as the server does' do
+      expect(hex(SurrealDB::SizedNumber.u8(5), cbor2: false)).to eq('05')
+      expect(hex(SurrealDB::SizedNumber.f32(1.5), cbor2: false)).to eq('f93e00')
+      expect(hex(SurrealDB::SizedNumber.u64(2**63), cbor2: false)).to eq(
+        "ca73#{'9223372036854775808'.unpack1('H*')}"
+      )
+    end
+
+    it 'leaves a plain Integer and Float untagged over cbor.2' do
+      expect(hex([5, 1.5], cbor2: true)).to eq('8205f93e00')
+    end
+  end
 end

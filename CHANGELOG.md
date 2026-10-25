@@ -71,6 +71,16 @@
 
 ### Added
 
+- `cbor.2` and SurrealDB 4.0's sized numbers. The client offers `cbor.2` before `cbor` on
+  WebSocket, and asks for `application/cbor; v=2` on HTTP, sending `cbor.2` bodies once the
+  server answers in it. A 4.0 server agrees; older servers answer plain `cbor`, which the
+  client keeps to. `Client#cbor_format` says which. `SurrealDB::SizedNumber` (`.i8`, `.u8`,
+  `.i16`, `.u16`, `.i32`, `.u32`, `.u64`, `.f16`, `.f32`) is sent as tags 180 to 188 over
+  `cbor.2`, and widened over plain `cbor`; the decoder reads those tags only over `cbor.2`,
+  and checks each value fits its kind. Embedded connections stay on plain `cbor`.
+- The CBOR test vectors and conformance scenarios of surrealdb-protocol v0.14.0, in the unit
+  tests and in CI (`conformance/`).
+
 - `gql` runs ISO GQL queries (the `gql` RPC method) and returns results like `query`.
   It needs SurrealDB 3.3, or 3.2 with the experimental `gql` capability enabled
   (`--allow-experimental gql`, which otherwise raises `NotAllowedError`); older servers

@@ -105,6 +105,8 @@ module SurrealDB
         @inner.connected? && !@restoring
       end
 
+      def cbor_format = @inner.cbor_format
+
       def supports_live_queries? = true
 
       def supports_transactions? = true

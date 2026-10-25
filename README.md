@@ -526,6 +526,29 @@ range = SurrealDB::Range.new(
   SurrealDB::BoundIncluded.new(1),
   SurrealDB::BoundExcluded.new(10)
 )
+
+# Sized numbers (SurrealDB 4.0): i8, u8, i16, u16, i32, u32, u64, f16 and f32
+small = SurrealDB::SizedNumber.u8(200)
+small.kind   # => :u8
+small.value  # => 200
+SurrealDB::SizedNumber.f32(0.1).value # => 0.10000000149011612, the nearest f32
+```
+
+### Sized numbers and `cbor.2`
+
+SurrealDB 4.0 keeps a number's width (`5u8`, `1.5f32`). The width travels only
+over `cbor.2`, the CBOR dialect the client asks a 4.0 server for, over
+WebSocket and HTTP alike. An older server does not know `cbor.2`, so the client
+falls back to plain `cbor` without a version check. Over plain `cbor` (and on
+embedded connections) a `SizedNumber` is sent widened, as the server widens
+it: an `Integer`, a `Float`, or a `BigDecimal` for a `u64` above the signed
+64-bit range. A plain `Integer` or `Float` is always SurrealDB's `int` or
+`float`.
+
+```ruby
+db.cbor_format # => :cbor2 with SurrealDB 4.0, :cbor with older servers
+db.query("RETURN $n", { "n" => SurrealDB::SizedNumber.u8(200) })
+# over cbor.2: [SurrealDB::SizedNumber(200u8)]; over plain cbor: [200]
 ```
 
 ## Error Handling
@@ -597,6 +620,24 @@ clause. Embedded connections use the engine's own query timeout instead.
 5. Commit your changes
 6. Push to the branch
 7. Create a Pull Request
+
+### Running the Conformance Suite
+
+The SDK runs the test vectors and scenarios of
+[surrealdb-protocol](https://github.com/surrealdb/surrealdb-protocol), at the tag
+in `conformance/surrealdb-protocol.version`. `conformance/fetch-protocol` checks
+it out into `tmp/`; the unit tests then run its CBOR vectors. To run the
+scenarios through `conformance/driver.rb` (needs [Bun](https://bun.sh) and a
+`surreal` binary on the `PATH`):
+
+```bash
+conformance/fetch-protocol
+(cd tmp/surrealdb-protocol && bun install && \
+  bun conformance/runner/cli.ts --driver "bundle exec ruby $PWD/conformance/driver.rb" --report ../report.json)
+conformance/check-report tmp/report.json
+```
+
+`conformance/known-failures.yml` lists the scenarios the SDK is known to fail.
 
 ### Running Integration Tests
 

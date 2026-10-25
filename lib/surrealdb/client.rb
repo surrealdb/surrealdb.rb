@@ -72,6 +72,15 @@ module SurrealDB
       @connection.connected?
     end
 
+    # The CBOR dialect the connection speaks. `cbor.2` (:cbor2) is negotiated
+    # with SurrealDB 4.0 over WebSocket and HTTP, and carries {SizedNumber}s
+    # as themselves. Plain `cbor` (:cbor), which older servers and embedded
+    # connections speak, widens them to Integer, Float or BigDecimal.
+    # @return [Symbol] :cbor or :cbor2
+    def cbor_format
+      @connection.cbor_format
+    end
+
     # --- Info ---
 
     # Returns the SurrealDB server version.

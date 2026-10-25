@@ -30,6 +30,12 @@ module SurrealDB
       include WebSocketConnect
       include WebSocketStreams
 
+      CBOR2_PROTOCOL = 'cbor.2'
+
+      # Offered in order of preference. A SurrealDB 4.0 server picks `cbor.2`;
+      # an older one does not know it and picks `cbor`.
+      PROTOCOLS = [CBOR2_PROTOCOL, 'cbor'].freeze
+
       # @return [Integer] response timeout in seconds
       attr_reader :timeout
 
@@ -69,7 +75,7 @@ module SurrealDB
         ws_url = build_ws_url(uri)
 
         @wrapper = SocketWrapper.new(@socket, ws_url)
-        @driver = ::WebSocket::Driver.client(@wrapper, protocols: ['cbor'])
+        @driver = ::WebSocket::Driver.client(@wrapper, protocols: PROTOCOLS)
         setup_driver_handlers
 
         begin
@@ -81,6 +87,7 @@ module SurrealDB
           raise
         end
 
+        @rpc.format = @driver.protocol == CBOR2_PROTOCOL ? :cbor2 : :cbor
         @connected = true
         @streaming_unavailable = false # the new connection may reach another server
         start_reader
@@ -316,7 +323,7 @@ module SurrealDB
         result = raw['result'] || raw
         return unless result.is_a?(Hash)
 
-        resolved = CBOR::Decoder.resolve(result)
+        resolved = CBOR::Decoder.resolve(result, cbor2: @rpc.cbor2?)
         live_id = resolved['id']&.to_s
         action = resolved['action']
         return unless live_id && action

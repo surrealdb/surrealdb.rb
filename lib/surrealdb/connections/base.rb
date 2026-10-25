@@ -66,6 +66,14 @@ module SurrealDB
         @connected
       end
 
+      # The CBOR dialect the connection speaks: :cbor2 once a SurrealDB 4.0
+      # server has agreed to `cbor.2`, which carries {SizedNumber}s as
+      # themselves, and :cbor otherwise, which widens them.
+      # @return [Symbol] :cbor or :cbor2
+      def cbor_format
+        @rpc.format
+      end
+
       # Whether this connection supports live queries.
       # @return [Boolean]
       def supports_live_queries?

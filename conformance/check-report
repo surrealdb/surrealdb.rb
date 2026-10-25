@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Checks a conformance run's --report file against known-failures.yml: fails
+# on a failure that is not listed, and on a listed failure that now passes.
+#
+#   conformance/check-report report.json
+
+require 'json'
+require 'yaml'
+
+report = JSON.parse(File.read(ARGV.fetch(0)))
+known = YAML.safe_load_file(File.join(__dir__, 'known-failures.yml')) || {}
+
+expected = lambda do |result|
+  entry = known[result['scenario']]
+  entry && (entry['transports'] || %w[ws http]).include?(result['transport'])
+end
+
+label = ->(result) { "#{result['transport']} #{result['scenario']}" }
+results = report.fetch('results')
+unexpected = results.select { |r| r.dig('outcome', 'status') == 'fail' && !expected.call(r) }
+fixed = results.select { |r| r.dig('outcome', 'status') == 'pass' && expected.call(r) }
+
+unexpected.each { |r| puts "FAIL #{label.call(r)}: #{r.dig('outcome', 'message')}" }
+fixed.each { |r| puts "PASS #{label.call(r)}: listed in known-failures.yml; take it off the list" }
+counts = results.map { |r| r.dig('outcome', 'status') }.tally
+puts "#{counts.fetch('pass', 0)} passed, #{counts.fetch('fail', 0)} failed " \
+     "(#{counts.fetch('fail', 0) - unexpected.length} known), #{counts.fetch('skip', 0)} skipped"
+exit(unexpected.empty? && fixed.empty? ? 0 : 1)

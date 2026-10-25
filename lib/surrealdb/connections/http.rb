@@ -27,6 +27,10 @@ module SurrealDB
         end
       end
 
+      CBOR_MIME = 'application/cbor'
+      CBOR2_MIME = 'application/cbor; v=2'
+      CBOR2_MEDIA_TYPE = %r{\A\s*application/cbor\s*;(?:[^;]*;)*\s*v\s*=\s*"?2"?\s*(?:;|\z)}i
+
       STALE_CONNECTION_ERRORS = [EOFError, Errno::EPIPE, Errno::ECONNRESET, Errno::ECONNABORTED, TLSEndOfFile].freeze
 
       def initialize(url, **options)
@@ -96,16 +100,16 @@ module SurrealDB
         # WebSocket (a protected name such as `auth`) before it is recorded.
         params = with_variables(method, params) if session.nil?
 
+        format = @rpc.format
         _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
-        request = build_request(encoded, session_state(session) || session_state,
+        request = build_request(encoded, format, session_state(session) || session_state,
                                 bearer: !CREDENTIAL_METHODS.include?(method))
         response = with_call_timeout(timeout) do
           execute_request(request, repeatable: txn.nil? && Protocol::Methods::SAFE_TO_REPEAT.include?(method))
         end
 
-        decoded = @rpc.decode_response(response.body)
-        Protocol::Response.extract_result(decoded)
+        decode(response)
       end
 
       private
@@ -135,18 +139,35 @@ module SurrealDB
       # Each HTTP request runs in a fresh server session unless it names an
       # attached one, so the namespace, database and token the client has
       # been given travel as headers on every request.
-      def build_request(body, state, bearer: true)
+      #
+      # Every request asks for `cbor.2`. A SurrealDB 4.0 server answers in it,
+      # and only then does the body go out as `cbor.2`: 4.0 refuses a `cbor.2`
+      # body that asks for a plain `cbor` answer, and an older server answers
+      # plain `cbor` whatever it is asked.
+      def build_request(body, format, state, bearer: true)
         uri = URI.parse(@url)
         path = uri.path.empty? ? '/rpc' : uri.path
 
         req = Net::HTTP::Post.new(path)
-        req['Content-Type'] = 'application/cbor'
-        req['Accept'] = 'application/cbor'
+        req['Content-Type'] = format == :cbor2 ? CBOR2_MIME : CBOR_MIME
+        req['Accept'] = CBOR2_MIME
         req['Authorization'] = "Bearer #{state.access_token}" if bearer && state.access_token
         req['surreal-ns'] = state.namespace if state.namespace
         req['surreal-db'] = state.database if state.database
         req.body = body
         req
+      end
+
+      # Decodes the response in the dialect its Content-Type names, which the
+      # next request is then encoded in.
+      def decode(response)
+        @rpc.format = cbor2_media_type?(response['Content-Type']) ? :cbor2 : :cbor
+        Protocol::Response.extract_result(@rpc.decode_response(response.body))
+      end
+
+      # `application/cbor; v=2`, with any spacing, case or quoting.
+      def cbor2_media_type?(content_type)
+        CBOR2_MEDIA_TYPE.match?(content_type.to_s)
       end
 
       # A call's timeout is one deadline for opening a new socket and reading

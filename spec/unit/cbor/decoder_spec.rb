@@ -162,4 +162,34 @@ RSpec.describe SurrealDB::CBOR::Decoder do
       expect(round_trip([])).to eq([])
     end
   end
+
+  describe 'sized numbers' do
+    def decode(hex, cbor2:)
+      described_class.decode([hex].pack('H*'), cbor2: cbor2)
+    end
+
+    it 'reads tags 180 to 188 over cbor.2' do
+      expect(decode('d8b505', cbor2: true)).to eq(SurrealDB::SizedNumber.u8(5))
+      expect(decode('d8ba1bffffffffffffffff', cbor2: true)).to eq(SurrealDB::SizedNumber.u64((2**64) - 1))
+      expect(decode('d8bbf93e00', cbor2: true)).to eq(SurrealDB::SizedNumber.f16(1.5))
+      expect(decode('d8bbfb3ff8000000000000', cbor2: true)).to eq(SurrealDB::SizedNumber.f16(1.5))
+    end
+
+    it 'refuses them over plain cbor' do
+      expect { decode('d8b505', cbor2: false) }.to raise_error(SurrealDB::ProtocolError, /only valid in cbor.2/)
+    end
+
+    it 'refuses a value outside the kind, or of the wrong type' do
+      expect { decode('d8b41880', cbor2: true) }.to raise_error(SurrealDB::ProtocolError, /outside the i8 range/)
+      expect { decode('d8b5f93c00', cbor2: true) }.to raise_error(SurrealDB::ProtocolError, /needs an Integer/)
+      expect { decode('d8bb01', cbor2: true) }.to raise_error(SurrealDB::ProtocolError, /needs a float/)
+      expect { decode('d8bbfb3fb999999999999a', cbor2: true) }.to raise_error(SurrealDB::ProtocolError, /exactly/)
+    end
+
+    it 'reads a sized integer record id key as a plain int' do
+      expect(decode('c8826174d8b505', cbor2: true)).to eq(SurrealDB::RecordID.new('t', 5))
+      expect { decode('c8826174d8ba1bffffffffffffffff', cbor2: true) }.to raise_error(SurrealDB::ProtocolError)
+      expect { decode('c8826174d8bbf93e00', cbor2: true) }.to raise_error(SurrealDB::ProtocolError)
+    end
+  end
 end

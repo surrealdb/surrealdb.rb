@@ -1,0 +1,18 @@
+#!/bin/sh
+# Checks out surrealdb-protocol (its test vectors and conformance suite) at
+# the tag in conformance/surrealdb-protocol.version, into tmp/surrealdb-protocol
+# or the directory given as the first argument.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+version=$(tr -d '[:space:]' < "$root/conformance/surrealdb-protocol.version")
+dir=${1:-"$root/tmp/surrealdb-protocol"}
+
+if [ "$(git -C "$dir" describe --tags --exact-match 2>/dev/null)" = "$version" ]; then
+  echo "surrealdb-protocol $version is in $dir"
+  exit 0
+fi
+
+rm -rf "$dir"
+git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$version" https://github.com/surrealdb/surrealdb-protocol.git "$dir"
+echo "surrealdb-protocol $version is in $dir"
