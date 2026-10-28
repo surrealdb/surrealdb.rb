@@ -18,8 +18,14 @@ module SurrealDB
     # @param version [String]
     # @return [Gem::Version, nil] nil when there is no version number in it
     def parse(version)
-      match = version.to_s.match(/(\d+)\.(\d+)\.(\d+)/)
-      Gem::Version.new(match[0]) if match
+      # Not /(\d+)\.(\d+)\.(\d+)/: unanchored, its backtracking is quadratic
+      # in a long run of digits. Each run of digits and dots is scanned once.
+      version.to_s.scan(/[\d.]+/) do |run|
+        run.split('.').each_cons(3) do |parts|
+          return Gem::Version.new(parts.join('.')) if parts.none?(&:empty?)
+        end
+      end
+      nil
     end
 
     # @param version [String] e.g. "surrealdb-3.3.4"
