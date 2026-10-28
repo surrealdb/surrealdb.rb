@@ -12,6 +12,20 @@ RSpec.describe SurrealDB::ServerVersion do
       expect(described_class.parse('surrealdb')).to be_nil
       expect(described_class.parse(nil)).to be_nil
     end
+
+    it 'takes the first three numbers that follow each other' do
+      expect(described_class.parse('v1..2.3.4.5')).to eq(Gem::Version.new('2.3.4'))
+      expect(described_class.parse('build 7, version 12.3.4.5')).to eq(Gem::Version.new('12.3.4'))
+      expect(described_class.parse('1.2. 3.4')).to be_nil
+    end
+
+    it 'reads a long run of digits in linear time' do
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect(described_class.parse('9' * 200_000)).to be_nil
+      expect(described_class.parse('9.' * 100_000)).to eq(Gem::Version.new('9.9.9'))
+      expect(described_class.parse("#{'9.9' * 50_000}x")).to eq(Gem::Version.new('9.99.99'))
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < 1
+    end
   end
 
   describe '.supported?' do
