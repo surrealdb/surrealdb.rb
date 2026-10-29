@@ -15,6 +15,7 @@ module SurrealDB
         @error = nil
       end
 
+      # @param timeout [Numeric, nil] nil waits for room for as long as it takes
       # @return [Boolean] false if the caller made no room within timeout
       def push(frame, timeout)
         !@queue.push(frame, timeout: timeout).nil?
@@ -35,6 +36,7 @@ module SurrealDB
         @queue.close
       end
 
+      # @param timeout [Numeric, nil] nil waits for a frame for as long as it takes
       # @raise [Error] the error the stream failed with, or TimeoutError
       def pop(timeout)
         frame = @queue.pop(timeout: timeout)
@@ -48,6 +50,11 @@ module SurrealDB
     # Streaming responses for {WebSocket}: requests such as `query_stream`
     # that the server answers with a sequence of frames under one request id.
     module WebSocketStreams
+      # How long the reader thread waits for a caller that stopped reading a
+      # stream when the connection has no timeout: every other response on
+      # the connection waits behind it.
+      STALLED_READER_TIMEOUT = 30
+
       protected
 
       # Frames of a streaming response arrive under the request's id until the
@@ -60,12 +67,12 @@ module SurrealDB
         @mutex.synchronize { @streams[id] = frames }
         done = false
         timeout ||= @timeout
-        deadline = monotonic_now + timeout
+        deadline = stream_deadline(timeout)
         begin
           write_frame(encoded, deadline, method)
           until done
             begin
-              deadline = monotonic_now + timeout
+              deadline = stream_deadline(timeout)
               result = next_stream_frame(frames, timeout)
             rescue ServerError
               done = true # the server answered with an error: there is no stream to stop
@@ -85,19 +92,26 @@ module SurrealDB
 
       private
 
+      # @return [Float, nil] nil without a timeout: no deadline
+      def stream_deadline(timeout)
+        timeout && (monotonic_now + timeout)
+      end
+
       def next_stream_frame(frames, timeout)
         Protocol::Response.extract_result(@rpc.decode_response(frames.pop(timeout)))
       end
 
       # Called by the reader thread with a frame for a stream. It waits up to
-      # the connection's timeout for the caller to make room, and gives the
-      # stream up after that, so a caller that stopped reading cannot hold
-      # up every other response on the connection for longer.
+      # the connection's timeout (or STALLED_READER_TIMEOUT without one) for
+      # the caller to make room, and gives the stream up after that, so a
+      # caller that stopped reading cannot hold up every other response on
+      # the connection for longer.
       def feed_stream(id, frames, bytes)
-        return if frames.push(bytes, @timeout)
+        patience = @timeout || STALLED_READER_TIMEOUT
+        return if frames.push(bytes, patience)
 
         @mutex.synchronize { @streams.delete(id) if @streams[id].equal?(frames) }
-        frames.fail(TimeoutError.new("stream not read for #{@timeout}s; it was stopped"))
+        frames.fail(TimeoutError.new("stream not read for #{patience}s; it was stopped"))
       end
 
       # Asks the server to stop a stream the caller stopped reading. Its last
@@ -115,7 +129,7 @@ module SurrealDB
       def cancel_stream(id, deadline)
         return unless @connected
 
-        left = [deadline - monotonic_now, @timeout, 5].min
+        left = [deadline && (deadline - monotonic_now), @timeout, 5].compact.min
         return send_without_answer(Protocol::Methods::QUERY_CANCEL, [id]) unless left.positive?
 
         execute(Protocol::Methods::QUERY_CANCEL, [id], timeout: left)
