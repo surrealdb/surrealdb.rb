@@ -32,8 +32,9 @@ module SurrealDB
 
         opts = Native::SrOption.new
         opts[:strict] = @strict
-        opts[:query_timeout] = @timeout
-        opts[:transaction_timeout] = @timeout
+        # 0 is no limit
+        opts[:query_timeout] = @timeout || 0
+        opts[:transaction_timeout] = @timeout || 0
 
         ret = Native.sr_surreal_rpc_new(err_ptr, surreal_ptr, @url, opts)
         check_error!(ret, err_ptr)

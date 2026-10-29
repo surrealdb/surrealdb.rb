@@ -26,8 +26,10 @@ module SurrealDB
 
     # @param url [String] connection URL (ws://, wss://, http://, https://)
     # @param options [Hash] connection options
-    # @option options [Numeric] :timeout response timeout in seconds
-    # @option options [Numeric] :connect_timeout WebSocket connect deadline (defaults to :timeout)
+    # @option options [Numeric, nil] :timeout seconds to wait for a response (default: none, wait
+    #   as long as the server takes; see {Configuration#timeout})
+    # @option options [Numeric] :connect_timeout WebSocket connect deadline (defaults to :timeout,
+    #   or 30 seconds without one)
     # @option options [Boolean] :reconnect reconnect WebSocket connections automatically (default true)
     # @option options [Integer] :reconnect_max_retries reconnection attempts before giving up (default 5)
     # @option options [Numeric] :reconnect_delay base backoff delay in seconds (default 1.0)

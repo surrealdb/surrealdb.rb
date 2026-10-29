@@ -41,7 +41,7 @@
 
 - WebSocket `connect` could hang forever: the TCP connect and the handshake reads had no
   deadline. Opening a connection (TCP, TLS and the WebSocket upgrade) now shares one
-  `connect_timeout` (defaults to `timeout`), and connection failures raise `ConnectionError`
+  `connect_timeout` (defaults to `timeout` when one is set, otherwise 30 seconds), and connection failures raise `ConnectionError`
   instead of raw `Errno` exceptions.
 
 - HTTP requests failed with `EOFError`/`EPIPE` when the kept-alive socket had been closed by
@@ -109,6 +109,16 @@
 
 ### Changed
 
+- **Breaking (default changed):** requests no longer time out by default. `SurrealDB.configuration.timeout`
+  and the `timeout:` connection option default to `nil` instead of 30 seconds, so a request
+  waits for as long as the server takes. A client-side timeout only stops the client waiting:
+  the server is not told and may still apply a write the client gave up on, so the old default
+  could report failure for work that succeeded. To keep a limit, set `config.timeout`, pass
+  `timeout:` to `Client.new`, or use the per-call `timeout:` / `with_timeout`; to stop a
+  statement on the server, use the `TIMEOUT` clause. Opening a connection is still limited:
+  `connect_timeout` defaults to `timeout` when one is set and to 30 seconds otherwise, and an
+  HTTP connection's socket open is limited the same way. Embedded connections now run without
+  an engine query or transaction timeout unless `timeout` is set.
 - **Breaking:** `query` returns one result per statement (`[1, [{...}]]`) instead of the
   server's raw `{status, time, result}` envelopes, and raises when a statement fails, with
   the first failed statement's error as the `ServerError` subclass for its kind (previously
