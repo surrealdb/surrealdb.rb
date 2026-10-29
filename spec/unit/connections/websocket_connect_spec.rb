@@ -4,6 +4,19 @@ require 'socket'
 require 'timeout'
 
 RSpec.describe SurrealDB::Connections::WebSocket do
+  describe 'timeout defaults' do
+    it 'has no request timeout, but still limits opening a connection' do
+      connection = described_class.new('ws://127.0.0.1:1')
+      expect(connection.timeout).to be_nil
+      expect(connection.connect_timeout).to eq(SurrealDB::Configuration::DEFAULT_CONNECT_TIMEOUT)
+    end
+
+    it 'opens within the request timeout when one is given, unless told otherwise' do
+      expect(described_class.new('ws://127.0.0.1:1', timeout: 7).connect_timeout).to eq(7)
+      expect(described_class.new('ws://127.0.0.1:1', timeout: 7, connect_timeout: 2).connect_timeout).to eq(2)
+    end
+  end
+
   # Fails the example instead of hanging the suite when connect blocks.
   def connect_within(seconds, connection)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)

@@ -44,9 +44,7 @@ module SurrealDB
         uri = URI.parse(@url)
         @http = Net::HTTP.new(uri.host, uri.port)
         @http.use_ssl = (uri.scheme == 'https')
-        @http.open_timeout = @timeout
-        @http.read_timeout = @timeout
-        @http.write_timeout = @timeout
+        reset_timeouts
 
         @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
 
@@ -183,10 +181,16 @@ module SurrealDB
           yield
         ensure
           @call_deadline = nil
-          @http.open_timeout = @timeout
-          @http.read_timeout = @timeout
-          @http.write_timeout = @timeout
+          reset_timeouts
         end
+      end
+
+      # The connection's own timeouts: none for reading and writing unless
+      # one was given, but opening a socket is always limited.
+      def reset_timeouts
+        @http.open_timeout = @timeout || Configuration::DEFAULT_CONNECT_TIMEOUT
+        @http.read_timeout = @timeout
+        @http.write_timeout = @timeout
       end
 
       # Sends the request on the kept-alive connection.
