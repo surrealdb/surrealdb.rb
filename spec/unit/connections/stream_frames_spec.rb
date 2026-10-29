@@ -126,4 +126,37 @@ RSpec.describe SurrealDB::Connections::WebSocket, '#execute_stream' do
     connection.send(:execute_stream, 'query_stream', ['SELECT 1']) { break }
     expect(connection).to be_supports_streaming
   end
+
+  context 'without a timeout' do
+    let(:connection) { described_class.new('ws://localhost:8000', timeout: nil) }
+
+    it 'streams, and stops a stream the caller leaves early' do
+      connection.instance_variable_set(:@connected, true)
+      sent = []
+      allow(connection).to receive(:write_frame) do |encoded, deadline, *|
+        sent << [SurrealDB::CBOR::Decoder.decode(encoded)['method'], deadline]
+        id = connection.instance_variable_get(:@streams).keys.first
+        frame = SurrealDB::CBOR::Encoder.encode({ 'id' => id, 'result' => { 'stream' => 'begin' } })
+        connection.send(:deliver_response, id, frame)
+      end
+      allow(connection).to receive(:execute) { |method, *| sent << [method, nil] }
+      frames = []
+      connection.send(:execute_stream, 'query_stream', ['SELECT 1']) do |frame|
+        frames << frame
+        break
+      end
+      expect(frames).to eq([{ 'stream' => 'begin' }])
+      expect(sent).to eq([['query_stream', nil], ['query_cancel', nil]])
+    end
+
+    it 'still gives up on a caller that stopped reading' do
+      stub_const('SurrealDB::Connections::WebSocketStreams::STALLED_READER_TIMEOUT', 0.1)
+      frames = SurrealDB::Connections::StreamFrames.new(1)
+      connection.instance_variable_get(:@streams)['req'] = frames
+      connection.send(:deliver_response, 'req', 'first')
+      connection.send(:deliver_response, 'req', 'second')
+      expect(frames.pop(1)).to eq('first')
+      expect { frames.pop(1) }.to raise_error(SurrealDB::TimeoutError, /not read for 0.1s/)
+    end
+  end
 end
