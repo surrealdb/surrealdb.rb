@@ -14,7 +14,10 @@ module SurrealDB
       attr_reader :base
 
       # @param url [String] the connection URL (ws://, wss://, http://, https://)
-      # @param timeout [Numeric] read and open timeout in seconds
+      # @param timeout [Numeric, nil] read and write timeout in seconds, and the
+      #   open timeout too when given; nil waits as long as the server takes
+      #   to answer, while opening a connection stays limited to
+      #   {Configuration::DEFAULT_CONNECT_TIMEOUT}
       def initialize(url, timeout:)
         uri = URI.parse(url)
         scheme = { 'ws' => 'http', 'wss' => 'https' }.fetch(uri.scheme, uri.scheme)
@@ -42,7 +45,7 @@ module SurrealDB
         req = build(verb, path, body, headers, state)
         block &&= guard(block)
         timeout ||= @timeout
-        deadline = monotonic_now + timeout
+        deadline = timeout && (monotonic_now + timeout)
         net_http(timeout).start do |conn|
           sending_within(conn, deadline, path)
           conn.request(req) do |response|
@@ -130,6 +133,8 @@ module SurrealDB
       # Opening the connection used part of the time; writing the request and
       # reading the answer get what is left.
       def sending_within(conn, deadline, path)
+        return if deadline.nil?
+
         left = deadline - monotonic_now
         raise TimeoutError.new("HTTP #{path} timed out while connecting", sent: false) unless left.positive?
 
@@ -144,7 +149,7 @@ module SurrealDB
       def net_http(timeout)
         Net::HTTP.new(@base.host, @base.port).tap do |http|
           http.use_ssl = @base.scheme == 'https'
-          http.open_timeout = timeout
+          http.open_timeout = timeout || Configuration::DEFAULT_CONNECT_TIMEOUT
           http.read_timeout = timeout
           http.write_timeout = timeout
         end

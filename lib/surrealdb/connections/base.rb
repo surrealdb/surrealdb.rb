@@ -50,7 +50,8 @@ module SurrealDB
       # @param session [Uuid, nil] attached session to run the request in
       # @param txn [Uuid, nil] transaction to run the request in
       # @param timeout [Numeric, nil] seconds to wait for the response, including
-      #   renewing the access token first; nil for the connection's timeout
+      #   renewing the access token first; nil for the connection's timeout, which is
+      #   none unless one was set
       # @return [Object] decoded result
       # @raise [TimeoutError] when no response arrives in time
       def send_request(method, params = [], session: nil, txn: nil, timeout: nil)
