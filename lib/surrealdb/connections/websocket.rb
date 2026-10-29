@@ -29,7 +29,8 @@ module SurrealDB
     class WebSocket < Base
       include WebSocketConnect
 
-      # @return [Integer] response timeout in seconds
+      # @return [Numeric, nil] response timeout in seconds; nil waits for as
+      #   long as the server takes
       attr_reader :timeout
 
       # @return [Numeric] how long opening the connection (TCP connect, TLS
@@ -39,7 +40,9 @@ module SurrealDB
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
-        @connect_timeout = options.fetch(:connect_timeout, @timeout)
+        @connect_timeout = options.fetch(:connect_timeout) do
+          @timeout || Configuration::DEFAULT_CONNECT_TIMEOUT
+        end
         @pending = {}
         @live_handlers = {}
         @mutex = Mutex.new
@@ -123,7 +126,7 @@ module SurrealDB
         @mutex.synchronize { @pending[id] = entry }
 
         timeout ||= @timeout
-        deadline = monotonic_now + timeout
+        deadline = timeout && (monotonic_now + timeout)
         begin
           write_frame(encoded, deadline, method)
           wait_for_response(entry, deadline, timeout)
@@ -339,12 +342,13 @@ module SurrealDB
       # Waits for the reader thread to deliver a response into the entry,
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
       # Waits for the response until the request's deadline, which writing
-      # the request has already used part of.
+      # the request has already used part of. Without a deadline it waits
+      # until the response arrives or the connection is lost.
       def wait_for_response(entry, deadline, timeout)
         result = @mutex.synchronize do
           while entry[:result].nil?
-            remaining = deadline - monotonic_now
-            raise TimeoutError, "request timed out after #{timeout}s" if remaining <= 0
+            remaining = deadline && (deadline - monotonic_now)
+            raise TimeoutError, "request timed out after #{timeout}s" if remaining && remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)
           end
