@@ -567,11 +567,12 @@ server reported.
 require "logger" # from Ruby 3.5, add `gem "logger"` to your Gemfile
 
 SurrealDB.configure do |config|
-  config.timeout = 60  # seconds (default: 30)
+  config.timeout = 60  # seconds to wait for a response (default: none, wait as long as the server takes)
   config.logger = Logger.new($stdout)
 end
 
-# Per-connection timeouts: requests, and opening the connection (TCP + TLS + handshake)
+# Per-connection timeouts: requests, and opening the connection (TCP + TLS + handshake;
+# 30 seconds unless connect_timeout, or timeout when given, says otherwise)
 client = SurrealDB::Client.new("ws://localhost:8000", timeout: 10, connect_timeout: 5)
 client.connect
 client.signin("user" => "root", "pass" => "root")
@@ -584,9 +585,9 @@ client.with_timeout(30) do
 end
 ```
 
-A timeout is how long the client waits: the request raises `SurrealDB::TimeoutError`, but
-the server may still finish it. To stop a statement on the server, give it a `TIMEOUT`
-clause. Embedded connections use the engine's own query timeout instead.
+There is no request timeout unless you set one. A timeout is how long the client waits:
+the request raises `SurrealDB::TimeoutError`, but the server may still finish it. To stop a
+statement on the server, give it a `TIMEOUT` clause. Embedded connections use the engine's own query timeout instead.
 
 ## Contributing
 
