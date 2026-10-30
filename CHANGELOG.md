@@ -74,6 +74,8 @@
   raise `ArgumentError`, fractions round up instead of truncating to 0 (no timeout), and
   `query_timeout:` / `transaction_timeout:` can be set separately.
 
+- Decoding a duration the server sends in short compact form (`0s` as `[]`, whole seconds as `[secs]`) no longer raises
+
 ### Added
 
 - `cbor.2` and SurrealDB 4.0's sized numbers. The client offers `cbor.2` before `cbor` on

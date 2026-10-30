@@ -81,6 +81,16 @@ RSpec.describe SurrealDB::CBOR::Decoder do
       expect(result).to eq(d)
     end
 
+    it 'decodes a compact Duration with no fields as zero' do
+      encoded = CBOR::Tagged.new(SurrealDB::CBOR::Tags::DURATION_COMPACT, []).to_cbor
+      expect(described_class.decode(encoded)).to eq(SurrealDB::Duration.new(0, 0))
+    end
+
+    it 'decodes a compact Duration with seconds only' do
+      encoded = CBOR::Tagged.new(SurrealDB::CBOR::Tags::DURATION_COMPACT, [5]).to_cbor
+      expect(described_class.decode(encoded)).to eq(SurrealDB::Duration.new(5, 0))
+    end
+
     it 'handles Time (datetime)' do
       t = Time.utc(2024, 6, 15, 12, 30, 45)
       result = round_trip(t)

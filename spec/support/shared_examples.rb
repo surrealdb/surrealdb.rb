@@ -154,6 +154,15 @@ RSpec.shared_examples 'query operations' do
     expect(results).to eq([[{ 'name' => 'Alice' }]])
   end
 
+  it 'returns durations the server sends in short compact form' do
+    result = client.query('RETURN [0s, 5s, 1500ms]').first['result']
+    expect(result).to eq([
+                           SurrealDB::Duration.new(0, 0),
+                           SurrealDB::Duration.new(5, 0),
+                           SurrealDB::Duration.new(1, 500_000_000)
+                         ])
+  end
+
   it 'handles multi-statement queries' do
     results = client.query("CREATE #{table}:a SET name = 'Alice'; CREATE #{table}:b SET name = 'Bob'; RETURN 3;")
     expect(results.length).to eq(3)

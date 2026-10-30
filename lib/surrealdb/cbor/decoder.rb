@@ -53,7 +53,8 @@ module SurrealDB
         when Tags::DECIMAL_STRING       then BigDecimal(value)
         when Tags::DATETIME_COMPACT     then Time.at(value[0], value[1], :nanosecond).utc
         when Tags::DURATION_STRING      then SurrealDB::Duration.parse(value)
-        when Tags::DURATION_COMPACT     then SurrealDB::Duration.new(value[0], value[1])
+        # The server omits trailing zero fields: [] is 0s and [secs] has no nanos.
+        when Tags::DURATION_COMPACT     then SurrealDB::Duration.new(value[0] || 0, value[1] || 0)
         when Tags::RANGE                then decode_range(value, cbor2)
         when Tags::BOUND_INCLUDED       then SurrealDB::BoundIncluded.new(resolve(value, cbor2: cbor2))
         when Tags::BOUND_EXCLUDED       then SurrealDB::BoundExcluded.new(resolve(value, cbor2: cbor2))
