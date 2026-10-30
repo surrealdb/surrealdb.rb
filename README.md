@@ -413,6 +413,10 @@ Supported schemes: `mem://` (in-memory), `surrealkv://path` (persistent), `file:
 
 Requires `libsurrealdb_c` installed on the system or pointed to via `SURREALDB_LIB_PATH`.
 
+The engine's query and transaction timeouts default to `timeout` and can be set separately
+with `query_timeout:` and `transaction_timeout:`. The engine takes whole seconds up to 255
+(`0` means no timeout); a longer timeout raises `ArgumentError`.
+
 ## Automatic Reconnection
 
 WebSocket connections reconnect automatically, with exponential backoff, as soon as a

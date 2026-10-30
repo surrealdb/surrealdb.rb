@@ -17,5 +17,6 @@
 # - libsurrealdb_c installed in the system library path
 
 require_relative 'native/platform'
+require_relative 'native/options'
 require_relative 'native/ffi'
 require_relative 'connections/embedded'

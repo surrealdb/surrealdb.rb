@@ -16,9 +16,18 @@ module SurrealDB
     # All FFI calls use `blocking: true` to release the GVL. However, the
     # Ruby-side request lifecycle is not atomic -- use one Client per thread.
     class Embedded < Base
+      # @param options [Hash]
+      # @option options [Numeric] :timeout default for both engine timeouts, in seconds
+      # @option options [Numeric] :query_timeout engine query timeout (0..255 seconds, 0 for none)
+      # @option options [Numeric] :transaction_timeout engine transaction timeout (0..255 seconds, 0 for none)
+      # @raise [ArgumentError] for a timeout the engine cannot take
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
+        @query_timeout = Native::Options.timeout_seconds(options.fetch(:query_timeout, @timeout), :query_timeout)
+        @transaction_timeout = Native::Options.timeout_seconds(
+          options.fetch(:transaction_timeout, @timeout), :transaction_timeout
+        )
         @strict = options.fetch(:strict, false)
         @rpc_ptr = nil
         @live_handlers = {}
@@ -32,9 +41,9 @@ module SurrealDB
 
         opts = Native::SrOption.new
         opts[:strict] = @strict
-        # 0 is no limit
-        opts[:query_timeout] = @timeout || 0
-        opts[:transaction_timeout] = @timeout || 0
+        # Validated in the constructor; nil becomes 0, which is no limit.
+        opts[:query_timeout] = @query_timeout
+        opts[:transaction_timeout] = @transaction_timeout
 
         ret = Native.sr_surreal_rpc_new(err_ptr, surreal_ptr, @url, opts)
         check_error!(ret, err_ptr)

@@ -69,6 +69,11 @@
   with `live` are issued again and keep delivering under the id the caller holds. The
   reconnect starts as soon as the drop is noticed.
 
+- Embedded timeouts above 255 seconds wrapped around: the engine takes them as a `uint8_t`,
+  so a `timeout` of 256 disabled the timeout and 300 became 44 seconds. Such timeouts now
+  raise `ArgumentError`, fractions round up instead of truncating to 0 (no timeout), and
+  `query_timeout:` / `transaction_timeout:` can be set separately.
+
 ### Added
 
 - `cbor.2` and SurrealDB 4.0's sized numbers. The client offers `cbor.2` before `cbor` on
