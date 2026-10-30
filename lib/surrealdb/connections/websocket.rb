@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'socket'
+require 'io/wait'
 require 'openssl'
 require 'uri'
 require 'websocket/driver'
@@ -26,69 +27,93 @@ module SurrealDB
     # Fiber scheduler (Ruby 3.1+). This means the SDK works transparently with
     # the `async` gem and similar frameworks.
     class WebSocket < Base
-      # @return [Integer] response timeout in seconds
+      include WebSocketConnect
+      include WebSocketStreams
+
+      CBOR2_PROTOCOL = 'cbor.2'
+
+      # Offered in order of preference. A SurrealDB 4.0 server picks `cbor.2`;
+      # an older one does not know it and picks `cbor`.
+      PROTOCOLS = [CBOR2_PROTOCOL, 'cbor'].freeze
+
+      # @return [Numeric, nil] response timeout in seconds; nil waits for as
+      #   long as the server takes
       attr_reader :timeout
+
+      # @return [Numeric] how long opening the connection (TCP connect, TLS
+      #   and the WebSocket handshake together) may take, in seconds
+      attr_reader :connect_timeout
 
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
+        @connect_timeout = options.fetch(:connect_timeout) do
+          @timeout || Configuration::DEFAULT_CONNECT_TIMEOUT
+        end
         @pending = {}
+        @streams = {}
         @live_handlers = {}
         @mutex = Mutex.new
         @write_mutex = Mutex.new
         @socket = nil
         @driver = nil
         @reader_thread = nil
+        @on_disconnect = nil
       end
 
+      # Registers a callback run (on its own thread) when the connection is
+      # lost without {#close} having been called.
+      # @yield [String] why the connection was lost
+      def on_disconnect(&block)
+        @on_disconnect = block
+      end
+
+      # Opens the connection. The TCP connect, the TLS handshake and the
+      # WebSocket handshake share one deadline of `connect_timeout` seconds.
+      # @raise [ConnectionError] if the server cannot be reached in time
       def connect
         uri = URI.parse(@url)
-        @socket = open_socket(uri)
+        deadline = monotonic_now + @connect_timeout
+        @socket = open_socket(uri, deadline)
         ws_url = build_ws_url(uri)
 
-        @driver = ::WebSocket::Driver.client(SocketWrapper.new(@socket, ws_url), protocols: ['cbor'])
+        @wrapper = SocketWrapper.new(@socket, ws_url)
+        @driver = ::WebSocket::Driver.client(@wrapper, protocols: PROTOCOLS)
         setup_driver_handlers
 
-        @driver.start
+        begin
+          send_upgrade(deadline)
+          wait_for_open(deadline)
+        rescue StandardError
+          @socket&.close
+          @socket = nil
+          raise
+        end
 
-        wait_for_open
-
+        @rpc.format = @driver.protocol == CBOR2_PROTOCOL ? :cbor2 : :cbor
         @connected = true
+        @streaming_unavailable = false # the new connection may reach another server
         start_reader
         log(:debug, "WebSocket connected to #{@url}")
       end
 
       def close
-        return unless @connected
-
+        was_connected = @connected
         @connected = false
-        @driver&.close
+        @driver&.close if was_connected
+        close_socket # unblocks the reader, which is waiting in readpartial
         shutdown_reader
-        @socket&.close
-        @socket = nil
 
         notify_pending_closed
-        log(:debug, 'WebSocket connection closed')
-      end
-
-      def send_request(method, params = [])
-        raise ConnectionError, 'not connected' unless @connected
-
-        id, encoded = @rpc.encode_request(method, params)
-        entry = { result: nil, cv: ConditionVariable.new }
-
-        @mutex.synchronize { @pending[id] = entry }
-
-        begin
-          @write_mutex.synchronize { @driver.binary(encoded) }
-          wait_for_response(entry)
-        ensure
-          @mutex.synchronize { @pending.delete(id) }
-        end
+        log(:debug, 'WebSocket connection closed') if was_connected
       end
 
       def supports_live_queries?
         true
+      end
+
+      def supports_streaming?
+        !@streaming_unavailable
       end
 
       # Registers a handler for live query notifications.
@@ -104,24 +129,27 @@ module SurrealDB
         @mutex.synchronize { @live_handlers.delete(live_query_id) }
       end
 
+      protected
+
+      def execute(method, params, session: nil, txn: nil, timeout: nil)
+        raise NotConnectedError, 'not connected' unless @connected
+
+        id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
+        entry = { result: nil, cv: ConditionVariable.new }
+
+        @mutex.synchronize { @pending[id] = entry }
+
+        timeout ||= @timeout
+        deadline = timeout && (monotonic_now + timeout)
+        begin
+          write_frame(encoded, deadline, method)
+          wait_for_response(entry, deadline, timeout)
+        ensure
+          @mutex.synchronize { @pending.delete(id) }
+        end
+      end
+
       private
-
-      def open_socket(uri)
-        tcp = TCPSocket.new(uri.host, uri.port || default_port(uri.scheme))
-        return tcp unless uri.scheme == 'wss'
-
-        ctx = OpenSSL::SSL::SSLContext.new
-        ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
-        ctx.cert_store = OpenSSL::X509::Store.new.tap(&:set_default_paths)
-        ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-        ssl.hostname = uri.host
-        ssl.connect
-        ssl
-      end
-
-      def default_port(scheme)
-        scheme == 'wss' ? 443 : 80
-      end
 
       def build_ws_url(uri)
         path = uri.path.empty? ? '/rpc' : uri.path
@@ -152,19 +180,26 @@ module SurrealDB
         end
 
         @driver.on :close do
-          @connected = false
-          notify_pending_closed
+          connection_lost('closed by the server')
         end
       end
 
-      def wait_for_open
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+      # The upgrade request is written within the connect deadline too: a
+      # peer that does not read would otherwise block the write.
+      def send_upgrade(deadline)
+        @wrapper.deadline = deadline
+        @driver.start
+      rescue SocketWrapper::WriteTimeout
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
+      rescue SystemCallError, IOError, OpenSSL::SSL::SSLError => e
+        raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
+      ensure
+        @wrapper.deadline = nil
+      end
 
+      def wait_for_open(deadline)
         loop do
-          remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          raise ConnectionError, 'WebSocket handshake timed out' if remaining <= 0
-
-          data = read_socket
+          data = read_handshake(deadline)
           raise ConnectionError, 'connection closed during handshake' if data.nil? || data.empty?
 
           @driver.parse(data)
@@ -178,6 +213,34 @@ module SurrealDB
         end
       end
 
+      # Reads handshake data with the time left, never blocking in a read: a
+      # server that accepts the connection but never answers the upgrade
+      # would otherwise hang connect forever. Over TLS the TCP socket can be
+      # readable with only part of a TLS record, on which a blocking read
+      # would wait for the rest, so the SSL socket is read without blocking.
+      # The deadline is checked before every read too, as a server that keeps
+      # sending part of an answer never makes a read wait.
+      def read_handshake(deadline)
+        loop do
+          remaining(deadline, 'WebSocket handshake')
+          return @socket.read_nonblock(16_384)
+        rescue IO::WaitReadable
+          wait_for_handshake(:wait_readable, deadline)
+        rescue IO::WaitWritable
+          wait_for_handshake(:wait_writable, deadline)
+        rescue EOFError
+          return nil
+        rescue SystemCallError, OpenSSL::SSL::SSLError => e
+          raise ConnectionError, "WebSocket handshake failed: #{e.class}: #{e.message}"
+        end
+      end
+
+      def wait_for_handshake(direction, deadline)
+        return if @socket.to_io.public_send(direction, remaining(deadline, 'WebSocket handshake'))
+
+        raise ConnectionError, "WebSocket handshake timed out after #{@connect_timeout}s"
+      end
+
       def start_reader
         @reader_thread = Thread.new do
           Thread.current.report_on_exception = false
@@ -189,20 +252,41 @@ module SurrealDB
         while @connected
           data = read_socket
           if data.nil? || data.empty?
-            @connected = false
-            notify_pending_closed
+            connection_lost('closed by the peer')
             break
           end
           @driver.parse(data)
         end
-      rescue IOError, Errno::ECONNRESET, OpenSSL::SSL::SSLError => e
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}") if @connected
+        connection_lost("#{e.class}: #{e.message}")
+      end
+
+      # Marks the connection dead, fails the requests waiting on it, and tells
+      # whoever asked (see {#on_disconnect}). Does nothing after {#close}.
+      def connection_lost(reason)
+        return unless @connected
+
         @connected = false
+        close_socket
         notify_pending_closed
-        log(:warn, "WebSocket reader terminated: #{e.class}: #{e.message}")
+        callback = @on_disconnect
+        Thread.new { callback.call(reason) } if callback
+      end
+
+      def close_socket
+        @socket&.close
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        @socket = nil
       end
 
       def read_socket
-        @socket.readpartial(16_384)
+        socket = @socket
+        return nil unless socket
+
+        socket.readpartial(16_384)
       rescue EOFError
         nil
       end
@@ -213,28 +297,36 @@ module SurrealDB
         raw = ::CBOR.decode(bytes)
         id = raw['id']
 
-        if id
-          delivered = @mutex.synchronize do
-            entry = @pending[id]
-            if entry
-              entry[:result] = bytes
-              entry[:cv].signal
-              true
-            end
-          end
-          dispatch_notification(raw) unless delivered
-        else
-          dispatch_notification(raw)
-        end
+        dispatch_notification(raw) unless id && deliver_response(id, bytes)
       rescue StandardError => e
         log(:warn, "Dropped malformed WebSocket message: #{e.class}: #{e.message}")
+      end
+
+      # Hands a response to the request or stream waiting for it.
+      # @return [Boolean] false when nothing is waiting for that id
+      def deliver_response(id, bytes)
+        stream = nil
+        delivered = @mutex.synchronize do
+          stream = @streams[id]
+          next true if stream
+
+          entry = @pending[id]
+          next false unless entry
+
+          entry[:result] = bytes
+          entry[:cv].signal
+          true
+        end
+        # Outside the mutex: feeding a stream can wait for its reader.
+        feed_stream(id, stream, bytes) if stream
+        delivered
       end
 
       def dispatch_notification(raw) # rubocop:disable Metrics/CyclomaticComplexity
         result = raw['result'] || raw
         return unless result.is_a?(Hash)
 
-        resolved = CBOR::Decoder.resolve(result)
+        resolved = CBOR::Decoder.resolve(result, cbor2: @rpc.cbor2?)
         live_id = resolved['id']&.to_s
         action = resolved['action']
         return unless live_id && action
@@ -249,9 +341,12 @@ module SurrealDB
       end
 
       def shutdown_reader
-        @reader_thread&.join(2)
-        @reader_thread&.kill if @reader_thread&.alive?
+        thread = @reader_thread
         @reader_thread = nil
+        return if thread.nil? || thread == Thread.current
+
+        thread.join(2)
+        thread.kill if thread.alive?
       end
 
       # Signals :closed on every pending request so blocked callers
@@ -263,17 +358,21 @@ module SurrealDB
             entry[:cv].signal
           end
           @pending.clear
+          @streams.each_value { |frames| frames.fail(ConnectionError.new('connection closed')) }
+          @streams.clear
         end
       end
 
       # Waits for the reader thread to deliver a response into the entry,
       # using ConditionVariable for Fiber-scheduler-compatible blocking.
-      def wait_for_response(entry)
+      # Waits for the response until the request's deadline, which writing
+      # the request has already used part of. Without a deadline it waits
+      # until the response arrives or the connection is lost.
+      def wait_for_response(entry, deadline, timeout)
         result = @mutex.synchronize do
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
           while entry[:result].nil?
-            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            raise TimeoutError, "request timed out after #{@timeout}s" if remaining <= 0
+            remaining = deadline && (deadline - monotonic_now)
+            raise TimeoutError, "request timed out after #{timeout}s" if remaining && remaining <= 0
 
             entry[:cv].wait(@mutex, remaining)
           end
@@ -286,23 +385,25 @@ module SurrealDB
         Protocol::Response.extract_result(response)
       end
 
-      def log(level, message)
-        SurrealDB.configuration.logger&.send(level, message)
-      end
-
-      # Minimal wrapper that gives websocket-driver the interface it expects:
-      # #url for the request URL, and #write for sending bytes.
-      class SocketWrapper
-        attr_reader :url
-
-        def initialize(socket, url)
-          @socket = socket
-          @url = url
+      # A frame the socket refused was not sent, so the request is safe to
+      # send again: report it as NotConnectedError, not as an interruption.
+      # Writing counts against the request's deadline. A frame that could
+      # not be written in time was not received whole, so the server did
+      # not run it; but part of it may have gone out, which leaves the
+      # connection unusable.
+      def write_frame(encoded, deadline, method)
+        @write_mutex.synchronize do
+          @wrapper.deadline = deadline
+          @driver.binary(encoded)
+        ensure
+          @wrapper.deadline = nil
         end
-
-        def write(data)
-          @socket.write(data)
-        end
+      rescue SocketWrapper::WriteTimeout
+        connection_lost('write timed out')
+        raise TimeoutError.new("'#{method}' timed out while it was being sent", sent: false)
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError => e
+        connection_lost("write failed: #{e.class}: #{e.message}")
+        raise NotConnectedError, "not connected (#{e.message})"
       end
     end
   end

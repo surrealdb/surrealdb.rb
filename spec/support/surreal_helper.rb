@@ -21,6 +21,13 @@ module SurrealHelper
     client
   end
 
+  # Names of the tables in the current database.
+  # @param client [SurrealDB::Client]
+  # @return [Array<String>]
+  def db_tables(client)
+    client.query_raw('INFO FOR DB')[0].result.fetch('tables', {}).keys
+  end
+
   # Generates a unique table name to avoid test collisions.
   # @param prefix [String]
   # @return [String]

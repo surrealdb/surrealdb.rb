@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative '../native/options'
+
 module SurrealDB
   module Connections
     # Embedded transport for SurrealDB via FFI to libsurrealdb_c.
@@ -16,9 +18,18 @@ module SurrealDB
     # All FFI calls use `blocking: true` to release the GVL. However, the
     # Ruby-side request lifecycle is not atomic -- use one Client per thread.
     class Embedded < Base
+      # @param options [Hash]
+      # @option options [Numeric] :timeout default for both engine timeouts, in seconds
+      # @option options [Numeric] :query_timeout engine query timeout (0..255 seconds, 0 for none)
+      # @option options [Numeric] :transaction_timeout engine transaction timeout (0..255 seconds, 0 for none)
+      # @raise [ArgumentError] for a timeout the engine cannot take
       def initialize(url, **options)
         super
         @timeout = options.fetch(:timeout, SurrealDB.configuration.timeout)
+        @query_timeout = Native::Options.timeout_seconds(options.fetch(:query_timeout, @timeout), :query_timeout)
+        @transaction_timeout = Native::Options.timeout_seconds(
+          options.fetch(:transaction_timeout, @timeout), :transaction_timeout
+        )
         @strict = options.fetch(:strict, false)
         @rpc_ptr = nil
         @live_handlers = {}
@@ -32,8 +43,9 @@ module SurrealDB
 
         opts = Native::SrOption.new
         opts[:strict] = @strict
-        opts[:query_timeout] = @timeout
-        opts[:transaction_timeout] = @timeout
+        # Validated in the constructor; nil becomes 0, which is no limit.
+        opts[:query_timeout] = @query_timeout
+        opts[:transaction_timeout] = @transaction_timeout
 
         ret = Native.sr_surreal_rpc_new(err_ptr, surreal_ptr, @url, opts)
         check_error!(ret, err_ptr)
@@ -54,10 +66,44 @@ module SurrealDB
         log(:debug, 'Embedded connection closed')
       end
 
-      def send_request(method, params = [])
+      def supports_live_queries?
+        true
+      end
+
+      # An embedded engine is healthy while it is open.
+      # @return [void]
+      def health(**)
+        raise ConnectionError, 'not connected' unless @connected
+      end
+
+      # An embedded database has no HTTP routes.
+      def http_endpoint
+        raise UnsupportedError, 'import, export and health are not available on embedded connections'
+      end
+
+      def http_request(*)
+        http_endpoint
+      end
+
+      # @param live_query_id [String]
+      # @param handler [Proc, Queue]
+      def on_notification(live_query_id, handler)
+        @mutex.synchronize { @live_handlers[live_query_id.to_s] = handler }
+      end
+
+      # @param live_query_id [String]
+      def remove_notification_handler(live_query_id)
+        @mutex.synchronize { @live_handlers.delete(live_query_id.to_s) }
+      end
+
+      protected
+
+      # A per-call timeout is not applied: the engine runs the request to its
+      # own query timeout.
+      def execute(method, params, session: nil, txn: nil, timeout: nil) # rubocop:disable Lint/UnusedMethodArgument
         raise ConnectionError, 'not connected' unless @connected
 
-        _id, encoded = @rpc.encode_request(method, params)
+        _id, encoded = @rpc.encode_request(method, params, session: session, txn: txn)
 
         err_ptr = FFI::MemoryPointer.new(:pointer)
         res_ptr = FFI::MemoryPointer.new(:pointer)
@@ -69,21 +115,6 @@ module SurrealDB
         check_error!(ret, err_ptr)
 
         read_and_free_response(res_ptr, ret)
-      end
-
-      def supports_live_queries?
-        true
-      end
-
-      # @param live_query_id [String]
-      # @param handler [Proc, Queue]
-      def on_notification(live_query_id, handler)
-        @mutex.synchronize { @live_handlers[live_query_id] = handler }
-      end
-
-      # @param live_query_id [String]
-      def remove_notification_handler(live_query_id)
-        @mutex.synchronize { @live_handlers.delete(live_query_id) }
       end
 
       private
@@ -156,7 +187,7 @@ module SurrealDB
         raw = ::CBOR.decode(bytes)
         resolved = CBOR::Decoder.resolve(raw)
         result = resolved.is_a?(Hash) ? (resolved['result'] || resolved) : resolved
-        live_id = result['id'] if result.is_a?(Hash)
+        live_id = result['id']&.to_s if result.is_a?(Hash) # a Uuid; handlers are kept by its string
         return unless live_id
 
         handler = @mutex.synchronize { @live_handlers[live_id] }
@@ -172,10 +203,6 @@ module SurrealDB
         @notification_thread&.join(2)
         @notification_thread&.kill if @notification_thread&.alive?
         @notification_thread = nil
-      end
-
-      def log(level, message)
-        SurrealDB.configuration.logger&.send(level, message)
       end
     end
   end

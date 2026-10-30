@@ -16,21 +16,50 @@ module SurrealDB
   #   results = client.select("users")
   #   client.close
   class Client
+    include RequestMethods
+
     # @return [Connections::Base]
     attr_reader :connection
 
+    # @return [String, nil] the server's version, as it reported it on connect
+    attr_reader :server_version
+
     # @param url [String] connection URL (ws://, wss://, http://, https://)
-    # @param options [Hash] connection options (:timeout, etc.)
+    # @param options [Hash] connection options
+    # @option options [Numeric, nil] :timeout seconds to wait for a response (default: none, wait
+    #   as long as the server takes; see {Configuration#timeout})
+    # @option options [Numeric] :connect_timeout WebSocket connect deadline (defaults to :timeout,
+    #   or 30 seconds without one)
+    # @option options [Boolean] :reconnect reconnect WebSocket connections automatically (default true)
+    # @option options [Integer] :reconnect_max_retries reconnection attempts before giving up (default 5)
+    # @option options [Numeric] :reconnect_delay base backoff delay in seconds (default 1.0)
+    # @option options [Boolean] :version_check refuse servers outside {ServerVersion} (default true)
+    # @option options [Boolean] :renew_tokens renew access tokens before they expire (default true)
+    # @option options [Numeric] :token_refresh_margin seconds before expiry to renew (default 60)
     def initialize(url, **options)
       @url = url
       @options = options
+      @version_check = options.fetch(:version_check, true)
+      @server_version = nil
       @connection = build_connection(url, **options)
+      # A reconnect may reach another server (a rolling upgrade, a failover).
+      @connection.on_reconnect { |fresh| check_server_version(fresh) } if @connection.respond_to?(:on_reconnect)
     end
 
-    # Opens the connection to SurrealDB.
+    # Opens the connection to SurrealDB and checks the server's version.
     # @return [self]
+    # @raise [UnsupportedVersionError] when the server's version is not supported
+    #   (the connection is closed again)
     def connect
       @connection.connect
+      begin
+        check_server_version
+      rescue StandardError
+        # Whatever went wrong, the caller gets no usable client back, so the
+        # transport must not be left open.
+        close_quietly
+        raise
+      end
       self
     end
 
@@ -45,225 +74,13 @@ module SurrealDB
       @connection.connected?
     end
 
-    # --- Namespace / Database ---
-
-    # Selects the namespace and database to use.
-    # @param namespace [String]
-    # @param database [String]
-    # @return [void]
-    def use(namespace, database)
-      @connection.send_request(Protocol::Methods::USE, [namespace, database])
-    end
-
-    # --- Authentication ---
-
-    # Signs in to SurrealDB.
-    # @param credentials [Hash] authentication credentials (string keys)
-    # @return [String, Hash] JWT token or tokens hash
-    def signin(credentials = {})
-      @connection.send_request(Protocol::Methods::SIGNIN, [credentials])
-    end
-
-    # Signs up a new user.
-    # @param credentials [Hash] signup credentials (string keys)
-    # @return [String, Hash] JWT token or tokens hash
-    def signup(credentials = {})
-      @connection.send_request(Protocol::Methods::SIGNUP, [credentials])
-    end
-
-    # Authenticates with an existing JWT token.
-    # @param token [String]
-    # @return [void]
-    def authenticate(token)
-      @connection.send_request(Protocol::Methods::AUTHENTICATE, [token])
-    end
-
-    # Invalidates the current session.
-    # @return [void]
-    def invalidate
-      @connection.send_request(Protocol::Methods::INVALIDATE)
-    end
-
-    # --- Variables ---
-
-    # Sets a connection-scoped variable.
-    # @param key [String]
-    # @param value [Object]
-    # @return [void]
-    def set(key, value)
-      @connection.send_request(Protocol::Methods::LET, [key, value])
-    end
-    alias let set
-
-    # Removes a connection-scoped variable.
-    # @param key [String]
-    # @return [void]
-    def unset(key)
-      @connection.send_request(Protocol::Methods::UNSET, [key])
-    end
-
-    # --- CRUD ---
-
-    # Selects all records from a table, or a single record by ID.
-    # @param resource [String, RecordID, Table] table name, "table:id", or RecordID
-    # @return [Array, Hash] records
-    def select(resource)
-      @connection.send_request(Protocol::Methods::SELECT, [resource_param(resource)])
-    end
-
-    # Creates a new record.
-    # @param resource [String, RecordID, Table]
-    # @param data [Hash, nil] record content
-    # @return [Hash] created record
-    def create(resource, data = nil)
-      params = [resource_param(resource)]
-      params << data unless data.nil?
-      @connection.send_request(Protocol::Methods::CREATE, params)
-    end
-
-    # Inserts one or more records into a table.
-    # @param table [String, Table] table name
-    # @param data [Hash, Array<Hash>] record(s) to insert
-    # @return [Array] inserted records
-    def insert(table, data)
-      @connection.send_request(Protocol::Methods::INSERT, [table_param(table), data])
-    end
-
-    # Inserts a relation record.
-    # @param table [String, Table] relation table name
-    # @param data [Hash] relation data (must include :in and :out)
-    # @return [Array] inserted relation records
-    def insert_relation(table, data)
-      @connection.send_request(Protocol::Methods::INSERT_RELATION, [table_param(table), data])
-    end
-
-    # Replaces a record or all records in a table.
-    # @param resource [String, RecordID, Table]
-    # @param data [Hash] replacement content
-    # @return [Object] updated record(s)
-    def update(resource, data)
-      @connection.send_request(Protocol::Methods::UPDATE, [resource_param(resource), data])
-    end
-
-    # Upserts a record (insert or update).
-    # @param resource [String, RecordID, Table]
-    # @param data [Hash] record content
-    # @return [Object] upserted record(s)
-    def upsert(resource, data)
-      @connection.send_request(Protocol::Methods::UPSERT, [resource_param(resource), data])
-    end
-
-    # Deep-merges data into a record.
-    # @param resource [String, RecordID, Table]
-    # @param data [Hash] data to merge
-    # @return [Object] merged record(s)
-    def merge(resource, data)
-      @connection.send_request(Protocol::Methods::MERGE, [resource_param(resource), data])
-    end
-
-    # Applies JSON Patch operations to a record.
-    # @param resource [String, RecordID, Table]
-    # @param patches [Array<Hash>] patch operations
-    # @return [Object] patched record(s)
-    def patch(resource, patches)
-      @connection.send_request(Protocol::Methods::PATCH, [resource_param(resource), patches])
-    end
-
-    # Deletes a record or all records from a table.
-    # @param resource [String, RecordID, Table]
-    # @return [Object] deleted record(s)
-    def delete(resource)
-      @connection.send_request(Protocol::Methods::DELETE, [resource_param(resource)])
-    end
-
-    # Creates a graph relation between two records.
-    # @param from [String, RecordID] source record
-    # @param relation [String] relation table
-    # @param to [String, RecordID] target record
-    # @param data [Hash, nil] relation content
-    # @return [Object] created relation
-    def relate(from, relation, to, data = nil)
-      params = [resource_param(from), relation, resource_param(to)]
-      params << data unless data.nil?
-      @connection.send_request(Protocol::Methods::RELATE, params)
-    end
-
-    # --- Query ---
-
-    # Executes a SurrealQL query.
-    # @param sql [String] SurrealQL statement(s)
-    # @param vars [Hash] query variables
-    # @return [Array] array of result sets (one per statement)
-    def query(sql, vars = {})
-      params = [sql]
-      params << vars unless vars.empty?
-      @connection.send_request(Protocol::Methods::QUERY, params)
-    end
-
-    # Executes a SurrealQL query and returns structured per-statement results.
-    # Unlike {#query}, this returns {QueryResult} objects with status, timing,
-    # and per-statement error information.
-    # @param sql [String] SurrealQL statement(s)
-    # @param vars [Hash] query variables
-    # @return [Array<QueryResult>]
-    def query_raw(sql, vars = {})
-      params = [sql]
-      params << vars unless vars.empty?
-      raw = @connection.send_request(Protocol::Methods::QUERY, params)
-      Array(raw).map { |stmt| QueryResult.from_response(stmt) }
-    end
-
-    # Runs a SurrealDB function.
-    # @param function_name [String]
-    # @param args [Array] function arguments
-    # @param version [String, nil] optional function version
-    # @return [Object]
-    def run(function_name, *args, version: nil)
-      @connection.send_request(Protocol::Methods::RUN, [function_name, version, args])
-    end
-
-    # --- Live Queries ---
-
-    # Starts a live query on a table (WebSocket only).
-    # @param resource [String, Table] table name
-    # @param diff [Boolean] whether to receive diffs instead of full records
-    # @return [String] live query UUID
-    def live(resource, diff: false)
-      require_live_queries!
-      @connection.send_request(Protocol::Methods::LIVE, [table_param(resource), diff])
-    end
-
-    # Subscribes to live query notifications.
-    # @param live_query_id [String] UUID from #live
-    # @yield [Hash] notification with :action and :result keys
-    # @return [void]
-    def subscribe(live_query_id, &block)
-      require_live_queries!
-      @connection.on_notification(live_query_id.to_s, block)
-    end
-
-    # Kills a live query.
-    # @param live_query_id [String]
-    # @return [void]
-    def kill(live_query_id)
-      require_live_queries!
-      @connection.remove_notification_handler(live_query_id.to_s)
-      @connection.send_request(Protocol::Methods::KILL, [live_query_id])
-    end
-
-    # --- Import / Export ---
-
-    # Imports SurrealQL data or ML model data into the database.
-    # @param content [String] SurrealQL or ML content to import
-    # @return [Object]
-    def import_data(content)
-      @connection.send_request(Protocol::Methods::IMPORT, [content])
-    end
-
-    # Exports the database as SurrealQL.
-    # @return [String] exported data
-    def export_data
-      @connection.send_request(Protocol::Methods::EXPORT)
+    # The CBOR dialect the connection speaks. `cbor.2` (:cbor2) is negotiated
+    # with SurrealDB 4.0 over WebSocket and HTTP, and carries {SizedNumber}s
+    # as themselves. Plain `cbor` (:cbor), which older servers and embedded
+    # connections speak, widens them to Integer, Float or BigDecimal.
+    # @return [Symbol] :cbor or :cbor2
+    def cbor_format
+      @connection.cbor_format
     end
 
     # --- Info ---
@@ -274,69 +91,168 @@ module SurrealDB
       @connection.send_request(Protocol::Methods::VERSION)
     end
 
-    # Returns info about the current session.
-    # @return [Hash, nil]
-    def info
-      @connection.send_request(Protocol::Methods::INFO)
-    end
-
-    # --- Sessions / Transactions (WebSocket only) ---
-
-    # Attaches a new session to the connection.
-    # @return [String] session ID
-    def attach
-      require_websocket!('sessions')
-      @connection.send_request(Protocol::Methods::ATTACH)
-    end
-
-    # Detaches a session from the connection.
-    # @param session_id [String]
+    # Checks that the server is up and its storage reachable, through its
+    # HTTP /health route (for embedded connections: that the engine is open).
     # @return [void]
-    def detach(session_id)
-      require_websocket!('sessions')
-      @connection.send_request(Protocol::Methods::DETACH, [session_id])
+    # @raise [ServerError] when the server reports itself unhealthy
+    # @raise [ConnectionError] when it cannot be reached
+    def health
+      @connection.health
+      nil
     end
 
-    # Begins a transaction on the current session.
+    # Like {#health}, but answers true or false instead of raising.
+    # @return [Boolean]
+    def healthy?
+      health
+      true
+    rescue Error
+      false
+    end
+
+    # --- Sessions ---
+
+    # Attaches a new server session on this connection.
+    #
+    # The session starts empty: no namespace, database, variables or
+    # credentials. Requests made through the returned {Session} run in it,
+    # independently of the client's default session and of other sessions.
+    #
+    # With a block, the session is detached when the block returns.
+    #
+    # @yield [Session] optional
+    # @return [Session]
+    # @example
+    #   client.new_session do |session|
+    #     session.use("app", "tenant_a")
+    #     session.signin("user" => "alice", "pass" => "secret", "ns" => "app")
+    #     session.select("invoice")
+    #   end
+    def new_session(&)
+      require_sessions!
+      id = Uuid.v4
+      @connection.send_request(Protocol::Methods::ATTACH, [], session: id)
+      with_session(Session.new(self, id), &)
+    end
+    alias attach new_session
+
+    # Attaches a new session that starts with a copy of another session's
+    # namespace, database, variables and credentials.
+    #
+    # @param from [Session, nil] the session to copy; nil copies the
+    #   client's default session
+    # @yield [Session] optional; the fork is detached when the block returns
+    # @return [Session]
+    def fork_session(from = nil, &)
+      state = @connection.session_state(from && session_id(from))
+      raise ArgumentError, "unknown session: #{from.inspect}" unless state
+
+      session = new_session
+      begin
+        restore_state(session, state.copy)
+      rescue StandardError
+        session.close
+        raise
+      end
+      with_session(session, &)
+    end
+
+    # Detaches a session, discarding its server-side state. A {Session}
+    # passed here is closed, so later requests through it raise
+    # {SessionError} instead of reaching the server.
+    # @param session [Session, Uuid, String]
     # @return [void]
-    def begin_transaction
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::BEGIN_TXN)
+    def detach(session)
+      require_sessions!
+      return if session.is_a?(Session) && session.closed?
+
+      @connection.send_request(Protocol::Methods::DETACH, [], session: session_id(session))
+      session.send(:detached!) if session.is_a?(Session)
+      nil
     end
 
-    # Commits the current transaction.
-    # @return [void]
-    def commit
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::COMMIT)
-    end
+    # Lists the ids of the sessions attached on this connection.
+    # @return [Array<Uuid>]
+    # @raise [UnsupportedError] over HTTP, where the server refuses it
+    def sessions
+      require_sessions!
+      unless @connection.supports_session_listing?
+        raise UnsupportedError, "listing sessions is not supported by #{@connection.class.name}"
+      end
 
-    # Cancels (rolls back) the current transaction.
-    # @return [void]
-    def cancel
-      require_websocket!('transactions')
-      @connection.send_request(Protocol::Methods::CANCEL)
-    end
-
-    # --- Generic RPC ---
-
-    # Sends an arbitrary RPC method call. Useful as an escape hatch for
-    # server methods not yet wrapped by the SDK.
-    # @param method [String] RPC method name
-    # @param params [Array] method parameters
-    # @return [Object] decoded result
-    def send_rpc(method, params = [])
-      @connection.send_request(method, params)
+      @connection.send_request(Protocol::Methods::SESSIONS)
     end
 
     private
+
+    # Asks the server for its version, on the given connection (a reconnect
+    # checks the new one before anything is restored on it).
+    def check_server_version(connection = @connection)
+      @server_version = connection.send_request(Protocol::Methods::VERSION).to_s
+      ServerVersion.check!(@server_version) if @version_check
+    end
+
+    def close_quietly
+      @connection.close
+    rescue StandardError => e
+      SurrealDB.configuration.logger&.debug("Closing after a failed connect also failed: #{e.message}")
+    end
+
+    # Requests made directly on the client run in the connection's default
+    # session.
+    def rpc(method, params = [], timeout: nil)
+      @connection.send_request(method, params, **timeout_option(timeout))
+    end
+
+    def stream_rpc(method, params, timeout, &)
+      @connection.stream_request(method, params, **timeout_option(timeout), &)
+    end
+
+    def request_session
+      nil
+    end
+
+    # The fork gets the credentials to renew its token as well as the token:
+    # the refresh token, and what the original last signed in with.
+    def restore_state(session, state)
+      session.use(state.namespace, state.database) if state.namespace || state.database
+      state.variables.each { |key, value| session.set(key, value) }
+      return unless state.access_token
+
+      session.authenticate(state.tokens)
+      @connection.session_state(session.id)&.signin = state.signin
+    end
+
+    def with_session(session)
+      return session unless block_given?
+
+      begin
+        yield session
+      ensure
+        session.close unless session.closed?
+      end
+    end
+
+    def session_id(session)
+      case session
+      when Session then session.id
+      when Uuid then session
+      else Uuid.parse(session.to_s)
+      end
+    end
+
+    def require_sessions!
+      return if @connection.supports_sessions?
+
+      raise UnsupportedError, "sessions are not supported by #{@connection.class.name}"
+    end
 
     def build_connection(url, **options)
       uri = URI.parse(url)
       case uri.scheme
       when 'ws', 'wss'
         ws = Connections::WebSocket.new(url, **options)
-        options[:reconnect] ? Connections::ReliableWebSocket.new(ws, **options) : ws
+        options.fetch(:reconnect, true) ? Connections::ReliableWebSocket.new(ws, **options) : ws
       when 'http', 'https'
         Connections::HTTP.new(url, **options)
       when 'mem', 'memory', 'surrealkv', 'file'
@@ -347,32 +263,6 @@ module SurrealDB
               "unsupported URL scheme: #{uri.scheme}. " \
               'Use ws://, wss://, http://, https://, mem://, surrealkv://, or file://'
       end
-    end
-
-    def resource_param(resource)
-      case resource
-      when Table then resource.name
-      else resource.to_s
-      end
-    end
-
-    def table_param(resource)
-      case resource
-      when Table then resource.name
-      else resource.to_s
-      end
-    end
-
-    def require_live_queries!
-      return if @connection.supports_live_queries?
-
-      raise UnsupportedError, 'live queries require a WebSocket connection (ws:// or wss://)'
-    end
-
-    def require_websocket!(feature)
-      return if @connection.supports_live_queries?
-
-      raise UnsupportedError, "#{feature} require a WebSocket connection (ws:// or wss://)"
     end
 
     def require_embedded!

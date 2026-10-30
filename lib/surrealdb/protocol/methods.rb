@@ -3,6 +3,7 @@
 module SurrealDB
   module Protocol
     module Methods
+      PING            = 'ping'
       USE             = 'use'
       INFO            = 'info'
       VERSION         = 'version'
@@ -10,11 +11,17 @@ module SurrealDB
       SIGNUP          = 'signup'
       AUTHENTICATE    = 'authenticate'
       INVALIDATE      = 'invalidate'
+      RESET           = 'reset'
+      REFRESH         = 'refresh'
+      REVOKE          = 'revoke'
       LET             = 'let'
       UNSET           = 'unset'
       LIVE            = 'live'
       KILL            = 'kill'
       QUERY           = 'query'
+      QUERY_STREAM    = 'query_stream'
+      QUERY_CANCEL    = 'query_cancel'
+      GQL             = 'gql'
       SELECT          = 'select'
       CREATE          = 'create'
       INSERT          = 'insert'
@@ -26,13 +33,19 @@ module SurrealDB
       DELETE          = 'delete'
       RELATE          = 'relate'
       RUN             = 'run'
-      IMPORT          = 'import'
-      EXPORT          = 'export'
       ATTACH          = 'attach'
       DETACH          = 'detach'
+      SESSIONS        = 'sessions'
       BEGIN_TXN       = 'begin'
       COMMIT          = 'commit'
       CANCEL          = 'cancel'
+
+      # Methods that can be sent again without changing anything when it is
+      # not known whether the first attempt ran. (Not DETACH: run twice, the
+      # second finds no session and fails.)
+      SAFE_TO_REPEAT = [
+        PING, VERSION, INFO, SELECT, USE, LET, 'set', UNSET, AUTHENTICATE, INVALIDATE, SESSIONS, RESET
+      ].freeze
     end
   end
 end

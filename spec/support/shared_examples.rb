@@ -10,93 +10,126 @@ RSpec.shared_examples 'CRUD operations' do
 
   after { client.close }
 
+  def rid(key)
+    SurrealDB::RecordID.new(table, key)
+  end
+
   def unwrap(result)
     result.is_a?(Array) && result.length == 1 ? result[0] : result
   end
 
   it 'creates and selects a record' do
     created = unwrap(client.create(table, { 'name' => 'Alice', 'age' => 30 }))
-    expect(created).to be_a(Hash)
+    expect(created['id']).to be_a(SurrealDB::RecordID)
+    expect(created['id'].table).to eq(table)
     expect(created['name']).to eq('Alice')
 
     records = client.select(table)
-    expect(records).to be_a(Array)
-    expect(records.length).to eq(1)
-    expect(records[0]['name']).to eq('Alice')
+    expect(records.map { |r| r['id'] }).to eq([created['id']])
   end
 
-  it 'creates a record with a specific id' do
-    record_id = "#{table}:alice"
-    created = unwrap(client.create(record_id, { 'name' => 'Alice' }))
-    expect(created).to be_a(Hash)
+  it 'creates a record with a specific id in the right table' do
+    created = unwrap(client.create(rid('alice'), { 'name' => 'Alice' }))
+    expect(created['id']).to eq(rid('alice'))
     expect(created['name']).to eq('Alice')
+
+    # Regression: record ids used to be sent as strings, so this created a
+    # table literally named "<table>:alice".
+    tables = db_tables(client)
+    expect(tables).to include(table)
+    expect(tables).not_to include("#{table}:alice")
+  end
+
+  it 'selects a single record by id' do
+    client.create(rid('alice'), { 'name' => 'Alice' })
+    client.create(rid('bob'), { 'name' => 'Bob' })
+    selected = unwrap(client.select(rid('alice')))
+    expect(selected).to eq({ 'id' => rid('alice'), 'name' => 'Alice' })
+  end
+
+  it 'lets the server parse a StringRecordID' do
+    client.create(rid('alice'), { 'name' => 'Alice' })
+    selected = unwrap(client.select(SurrealDB::StringRecordID.new("#{table}:alice")))
+    expect(selected['id']).to eq(rid('alice'))
+  end
+
+  it 'round-trips integer and array record keys' do
+    created = unwrap(client.create(rid(42), { 'n' => 1 }))
+    expect(created['id']).to eq(rid(42))
+    created = unwrap(client.create(rid(['London', 7]), { 'n' => 2 }))
+    expect(created['id']).to eq(rid(['London', 7]))
+    expect(unwrap(client.select(rid(['London', 7])))['n']).to eq(2)
+  end
+
+  it 'refuses a "table:id" string instead of guessing' do
+    expect { client.select("#{table}:alice") }.to raise_error(ArgumentError, /RecordID/)
   end
 
   it 'inserts multiple records' do
-    data = [
-      { 'name' => 'Alice' },
-      { 'name' => 'Bob' }
-    ]
-    inserted = client.insert(table, data)
-    expect(inserted).to be_a(Array)
-    expect(inserted.length).to eq(2)
+    inserted = client.insert(table, [{ 'name' => 'Alice' }, { 'name' => 'Bob' }])
+    expect(inserted.map { |r| r['name'] }).to contain_exactly('Alice', 'Bob')
+    expect(inserted.map { |r| r['id'].table }.uniq).to eq([table])
+    expect(client.select(table).length).to eq(2)
   end
 
   it 'updates a record' do
-    client.create("#{table}:one", { 'name' => 'Alice', 'age' => 30 })
-    updated = unwrap(client.update("#{table}:one", { 'name' => 'Alice', 'age' => 31 }))
-    expect(updated).to be_a(Hash)
-    expect(updated['age']).to eq(31)
+    client.create(rid('one'), { 'name' => 'Alice', 'age' => 30 })
+    updated = unwrap(client.update(rid('one'), { 'name' => 'Alice', 'age' => 31 }))
+    expect(updated).to eq({ 'id' => rid('one'), 'name' => 'Alice', 'age' => 31 })
+    expect(unwrap(client.select(rid('one')))['age']).to eq(31)
   end
 
   it 'upserts a record' do
-    upserted = unwrap(client.upsert("#{table}:up1", { 'name' => 'Charlie', 'score' => 100 }))
-    expect(upserted).to be_a(Hash)
-    expect(upserted['name']).to eq('Charlie')
+    upserted = unwrap(client.upsert(rid('up1'), { 'name' => 'Charlie', 'score' => 100 }))
+    expect(upserted).to eq({ 'id' => rid('up1'), 'name' => 'Charlie', 'score' => 100 })
+    upserted = unwrap(client.upsert(rid('up1'), { 'name' => 'Charlie', 'score' => 101 }))
+    expect(upserted['score']).to eq(101)
+    expect(client.select(table).length).to eq(1)
   end
 
   it 'merges data into a record' do
-    client.create("#{table}:m1", { 'name' => 'Alice', 'age' => 30 })
-    merged = unwrap(client.merge("#{table}:m1", { 'email' => 'alice@test.com' }))
-    expect(merged).to be_a(Hash)
-    expect(merged['name']).to eq('Alice')
-    expect(merged['email']).to eq('alice@test.com')
+    client.create(rid('m1'), { 'name' => 'Alice', 'age' => 30 })
+    merged = unwrap(client.merge(rid('m1'), { 'email' => 'alice@test.com' }))
+    expect(merged).to eq({ 'id' => rid('m1'), 'name' => 'Alice', 'age' => 30, 'email' => 'alice@test.com' })
   end
 
   it 'patches a record' do
-    client.create("#{table}:p1", { 'name' => 'Alice', 'age' => 30 })
-    patched = unwrap(client.patch("#{table}:p1", [
-                                    { 'op' => 'replace', 'path' => '/age', 'value' => 31 }
-                                  ]))
-    expect(patched).to be_a(Hash)
+    client.create(rid('p1'), { 'name' => 'Alice', 'age' => 30 })
+    client.patch(rid('p1'), [{ 'op' => 'replace', 'path' => '/age', 'value' => 31 }])
+    expect(unwrap(client.select(rid('p1')))['age']).to eq(31)
   end
 
   it 'deletes a record' do
-    client.create("#{table}:d1", { 'name' => 'Alice' })
-    deleted = unwrap(client.delete("#{table}:d1"))
-    expect(deleted).to be_a(Hash)
-
-    # SurrealDB 3.0 raises NotFoundError on select from empty/nonexistent tables
-    remaining = begin
-      client.select(table)
-    rescue SurrealDB::NotFoundError
-      []
-    end
-    expect(remaining).to be_empty
+    client.create(rid('d1'), { 'name' => 'Alice' })
+    client.create(rid('d2'), { 'name' => 'Bob' })
+    deleted = unwrap(client.delete(rid('d1')))
+    expect(deleted).to eq({ 'id' => rid('d1'), 'name' => 'Alice' })
+    expect(client.select(table).map { |r| r['id'] }).to eq([rid('d2')])
   end
 
   it 'deletes all records from a table' do
-    client.query("DEFINE TABLE #{table} SCHEMALESS")
-    client.create("#{table}:d2", { 'name' => 'Alice' })
-    client.create("#{table}:d3", { 'name' => 'Bob' })
+    client.create(rid('d2'), { 'name' => 'Alice' })
+    client.create(rid('d3'), { 'name' => 'Bob' })
     client.delete(table)
-
     remaining = begin
       client.select(table)
-    rescue SurrealDB::NotFoundError
+    rescue SurrealDB::NotFoundError # SurrealDB 3.0 may answer this for an emptied table
       []
     end
-    expect(remaining).to be_empty
+    expect(remaining).to eq([])
+  end
+
+  it 'relates two records' do
+    alice = rid('alice')
+    bob = rid('bob')
+    client.create(alice, {})
+    client.create(bob, {})
+    edge_table = unique_table('knows')
+    edge = unwrap(client.relate(alice, edge_table, bob, { 'since' => 2020 }))
+    expect(edge['in']).to eq(alice)
+    expect(edge['out']).to eq(bob)
+    expect(edge['id'].table).to eq(edge_table)
+    expect(edge['since']).to eq(2020)
   end
 end
 
@@ -105,25 +138,57 @@ RSpec.shared_examples 'query operations' do
 
   after { client.close }
 
-  it 'executes a raw query' do
-    client.create(table, { 'name' => 'Alice', 'age' => 30 })
+  it 'executes a raw query, returning one result per statement' do
+    client.create(SurrealDB::RecordID.new(table, 'alice'), { 'name' => 'Alice', 'age' => 30 })
     results = client.query("SELECT * FROM #{table}")
-    expect(results).to be_a(Array)
+    expect(results).to eq([[{ 'id' => SurrealDB::RecordID.new(table, 'alice'), 'name' => 'Alice', 'age' => 30 }]])
   end
 
   it 'executes a parameterized query' do
     client.create(table, { 'name' => 'Alice', 'age' => 30 })
     client.create(table, { 'name' => 'Bob', 'age' => 25 })
-    results = client.query('SELECT * FROM type::table($table) WHERE age > $min_age', {
+    results = client.query('SELECT name FROM type::table($table) WHERE age > $min_age', {
                              'table' => table,
                              'min_age' => 28
                            })
-    expect(results).to be_a(Array)
+    expect(results).to eq([[{ 'name' => 'Alice' }]])
+  end
+
+  it 'returns durations the server sends in short compact form' do
+    result = client.query('RETURN [0s, 5s, 1500ms]').first
+    expect(result).to eq([
+                           SurrealDB::Duration.new(0, 0),
+                           SurrealDB::Duration.new(5, 0),
+                           SurrealDB::Duration.new(1, 500_000_000)
+                         ])
   end
 
   it 'handles multi-statement queries' do
-    results = client.query("CREATE #{table}:a SET name = 'Alice'; CREATE #{table}:b SET name = 'Bob';")
-    expect(results).to be_a(Array)
+    results = client.query("CREATE #{table}:a SET name = 'Alice'; CREATE #{table}:b SET name = 'Bob'; RETURN 3;")
+    expect(results.length).to eq(3)
+    expect(results[0].map { |r| r['id'] }).to eq([SurrealDB::RecordID.new(table, 'a')])
+    expect(results[1].map { |r| r['name'] }).to eq(['Bob'])
+    expect(results[2]).to eq(3)
+  end
+
+  it 'raises the error of a failed statement, as the class for its kind' do
+    expect { client.query("RETURN 1; THROW 'boom'; RETURN 2") }
+      .to raise_error(SurrealDB::ThrownError, /boom/) { |e| expect(e.kind).to eq('Thrown') }
+    # the first failure wins
+    expect { client.query("RETURN 1; SELECT * FROM #{table}:x; THROW 'second'") }
+      .to raise_error(SurrealDB::NotFoundError, /#{table}/)
+  end
+
+  it 'raises a parse error as ValidationError' do
+    expect { client.query('INVALID SYNTAX') }.to raise_error(SurrealDB::ValidationError, /Parse error/)
+  end
+
+  it 'reports every statement, failed or not, through query_raw' do
+    results = client.query_raw("RETURN 1; THROW 'boom'; RETURN 2")
+    expect(results.map(&:status)).to eq(%w[OK ERR OK])
+    expect(results.map(&:result)).to eq([1, nil, 2])
+    expect(results[1].error).to match(/boom/)
+    expect(results[1].time).to be_a(String)
   end
 end
 
@@ -131,15 +196,709 @@ RSpec.shared_examples 'auth operations' do
   after { client.close }
 
   it 'returns version info' do
-    version = client.version
-    expect(version).to be_a(String)
-    expect(version).to include('surrealdb')
+    expect(client.version).to match(/\Asurrealdb-\d+\.\d+\.\d+/)
+  end
+
+  it 'checked the server version on connect' do
+    expect(client.server_version).to eq(client.version)
+    expect(SurrealDB::ServerVersion.supported?(client.server_version)).to be(true)
   end
 
   it 'can invalidate and re-signin' do
     client.invalidate
+    expect { client.query('INFO FOR DB') }.to raise_error(SurrealDB::NotAllowedError)
+
     client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
     client.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
-    expect(client.version).to be_a(String)
+    expect(client.query('INFO FOR DB')[0]).to include('tables')
+  end
+
+  it 'reports wrong credentials as NotAllowedError' do
+    client.invalidate
+    expect { client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => 'wrong' }) }
+      .to raise_error(SurrealDB::NotAllowedError)
+  end
+end
+
+RSpec.shared_examples 'value round-trips' do
+  let(:table) { unique_table('types') }
+
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  it 'decodes server UUIDs as Uuid, not String' do
+    expect(value_of('RETURN rand::uuid::v7()')).to be_a(SurrealDB::Uuid)
+  end
+
+  it 'sends Uuid as a uuid, not a string' do
+    uuid = SurrealDB::Uuid.v4
+    expect(value_of('RETURN [type::is_uuid($u), type::is_string($u), $u]', { 'u' => uuid })).to eq([true, false, uuid])
+  end
+
+  it 'round-trips a uuid-keyed record id' do
+    rid = SurrealDB::RecordID.new(table, SurrealDB::Uuid.v7)
+    created = client.create(rid, { 'n' => 1 })
+    created = created[0] if created.is_a?(Array)
+    expect(created['id']).to eq(rid)
+    selected = client.select(rid)
+    selected = selected[0] if selected.is_a?(Array)
+    expect(selected).to eq({ 'id' => rid, 'n' => 1 })
+  end
+
+  it 'round-trips sets' do
+    expect(value_of('RETURN <set>[3, 1, 1]')).to eq(Set[1, 3])
+    expect(value_of('RETURN $s', { 's' => Set['a', 'b'] })).to eq(Set['a', 'b'])
+  end
+
+  it 'round-trips file pointers' do
+    file = SurrealDB::FileRef.new('bucket', '/some/key.txt')
+    expect(value_of('RETURN $f', { 'f' => file })).to eq(file)
+  end
+
+  it 'round-trips datetimes with nanosecond precision, before and after 1970' do
+    [Time.utc(2024, 2, 29, 12, 0, 0, Rational(123_456_789, 1000)), Time.utc(1969, 7, 20, 20, 17, 40.5r)].each do |time|
+      back = value_of('RETURN $t', { 't' => time })
+      expect(back).to eq(time)
+      expect(value_of('RETURN type::is_datetime($t)', { 't' => time })).to be(true)
+    end
+  end
+end
+
+RSpec.shared_examples 'sized numbers' do
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  def server_major
+    client.version[/\d+/].to_i
+  end
+
+  def require_cbor2!
+    skip "the server did not negotiate cbor.2 (#{client.version})" unless client.cbor_format == :cbor2
+  end
+
+  it 'speaks cbor.2 with SurrealDB 4.0 and plain cbor with older servers' do
+    expect(client.cbor_format).to eq(server_major >= 4 ? :cbor2 : :cbor)
+  end
+
+  it 'sends a sized number widened over plain cbor' do
+    skip 'the connection speaks cbor.2' if client.cbor_format == :cbor2
+
+    vars = { 'small' => SurrealDB::SizedNumber.u8(5), 'big' => SurrealDB::SizedNumber.u64((2**64) - 1),
+             'float' => SurrealDB::SizedNumber.f32(1.5) }
+    expect(value_of('RETURN [$small, $big, $float]', vars)).to eq([5, BigDecimal('18446744073709551615'), 1.5])
+  end
+
+  it 'round-trips every sized kind over cbor.2' do
+    require_cbor2!
+
+    numbers = [SurrealDB::SizedNumber.i8(-128), SurrealDB::SizedNumber.u8(255), SurrealDB::SizedNumber.i16(-3),
+               SurrealDB::SizedNumber.u16(65_535), SurrealDB::SizedNumber.i32(-2**31),
+               SurrealDB::SizedNumber.u32((2**32) - 1), SurrealDB::SizedNumber.u64((2**64) - 1),
+               SurrealDB::SizedNumber.f16(1.5), SurrealDB::SizedNumber.f32(0.1)]
+    expect(value_of('RETURN $n', { 'n' => numbers })).to eq(numbers)
+    expect(value_of('RETURN $n.map(|$x| type::of($x))', { 'n' => numbers })).to eq(
+      %w[i8 u8 i16 u16 i32 u32 u64 f16 f32]
+    )
+  end
+
+  it 'decodes the sized numbers the server returns over cbor.2' do
+    require_cbor2!
+
+    expect(value_of('RETURN [5u8, -3i16, 18446744073709551615u64, 1.5f32, 5]')).to eq(
+      [SurrealDB::SizedNumber.u8(5), SurrealDB::SizedNumber.i16(-3), SurrealDB::SizedNumber.u64((2**64) - 1),
+       SurrealDB::SizedNumber.f32(1.5), 5]
+    )
+  end
+
+  it 'reports a value outside a sized field as a server error over cbor.2' do
+    require_cbor2!
+
+    table = unique_table('sized')
+    client.query("DEFINE FIELD n ON #{table} TYPE u8")
+    expect { client.query("CREATE #{table}:one SET n = $n", { 'n' => 300 }) }.to raise_error(SurrealDB::ServerError)
+    created = client.query("CREATE #{table}:two SET n = $n RETURN VALUE n", { 'n' => SurrealDB::SizedNumber.u8(200) })
+    expect(created.flatten).to eq([SurrealDB::SizedNumber.u8(200)])
+  end
+end
+
+RSpec.shared_examples 'sessions' do
+  after { client.close }
+
+  def where_am_i(target)
+    target.query_raw('RETURN [session::ns(), session::db()]')[0].result
+  end
+
+  # Whether the session is signed in as a user allowed to define things.
+  def can_define?(target)
+    target.query_raw("DEFINE TABLE OVERWRITE #{unique_table('auth')}")[0].ok?
+  end
+
+  def signed_in_session
+    session = client.new_session
+    session.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    session.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    session
+  end
+
+  it 'runs a new session independently of the default session' do
+    session = client.new_session
+    expect(session.id).to be_a(SurrealDB::Uuid)
+    expect(where_am_i(session)).to eq([SurrealDB::NONE, SurrealDB::NONE])
+
+    session.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    session.use('sess_ns', 'sess_db')
+    expect(where_am_i(session)).to eq(%w[sess_ns sess_db])
+    expect(where_am_i(client)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+  ensure
+    session&.close
+  end
+
+  it 'keeps variables per session' do
+    one = signed_in_session
+    two = signed_in_session
+    one.set('who', 'one')
+    two.set('who', 'two')
+    expect(one.query_raw('RETURN $who')[0].result).to eq('one')
+    expect(two.query_raw('RETURN $who')[0].result).to eq('two')
+    two.unset('who')
+    expect(two.query_raw('RETURN $who')[0].result).to eq(SurrealDB::NONE)
+  ensure
+    one&.close
+    two&.close
+  end
+
+  it 'keeps credentials per session' do
+    session = client.new_session
+    session.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    expect(can_define?(session)).to be(false)
+    expect(can_define?(client)).to be(true)
+  ensure
+    session&.close
+  end
+
+  it 'detaches a session' do
+    session = client.new_session
+    id = session.id
+    session.close
+    expect(session).to be_closed
+    expect { session.query('RETURN 1') }.to raise_error(SurrealDB::SessionError)
+    expect { client.connection.send_request('query', ['RETURN 1'], session: id) }
+      .to raise_error(SurrealDB::NotFoundError, /Session not found/)
+  end
+
+  it 'detaches when the block returns' do
+    id = client.new_session(&:id)
+    expect { client.connection.send_request('query', ['RETURN 1'], session: id) }
+      .to raise_error(SurrealDB::NotFoundError)
+  end
+
+  it 'forks a session with its namespace, database, variables and credentials' do
+    source = signed_in_session
+    source.set('greeting', 'hello')
+    source.fork_session do |fork|
+      expect(fork.id).not_to eq(source.id)
+      expect(where_am_i(fork)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+      expect(fork.query_raw('RETURN $greeting')[0].result).to eq('hello')
+      expect(can_define?(fork)).to be(true)
+
+      fork.set('greeting', 'changed')
+      expect(source.query_raw('RETURN $greeting')[0].result).to eq('hello')
+    end
+  ensure
+    source&.close
+  end
+
+  it 'forks the default session' do
+    client.fork_session do |fork|
+      expect(where_am_i(fork)).to eq([SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB])
+      expect(can_define?(fork)).to be(true)
+    end
+  end
+end
+
+RSpec.shared_examples 'import and export' do
+  let(:table) { unique_table('impexp') }
+
+  after { client.close }
+
+  def rid(key)
+    SurrealDB::RecordID.new(table, key)
+  end
+
+  it 'imports SurrealQL through the HTTP route' do
+    client.import("OPTION IMPORT; DEFINE TABLE #{table} SCHEMALESS; " \
+                  "CREATE #{table}:one SET n = 1; CREATE #{table}:two SET n = 2;")
+    expect(client.select(table).map { |r| r['n'] }.sort).to eq([1, 2])
+  end
+
+  it 'imports from an IO' do
+    client.import(StringIO.new("OPTION IMPORT; CREATE #{table}:io SET n = 3;"))
+    expect(client.select(rid('io'))).to include('n' => 3)
+  end
+
+  it 'passes on the server refusing content without OPTION IMPORT' do
+    expect { client.import("CREATE #{table}:x") }.to raise_error(SurrealDB::ServerError, /OPTION IMPORT/)
+  end
+
+  it 'reports failed statements, keeping the ones that ran' do
+    sql = "OPTION IMPORT; CREATE #{table}:ok SET n = 1; THROW 'import broke'; CREATE #{table}:after SET n = 2;"
+    expect { client.import(sql) }.to raise_error(SurrealDB::ImportError) { |e|
+      expect(e.count).to eq(1)
+      expect(e.failures.first).to be_a(SurrealDB::ServerError)
+      expect(e.failures.first.message).to include('import broke')
+    }
+    expect(client.select(rid('ok'))).to include('n' => 1)
+  end
+
+  it 'refuses an import without credentials' do
+    anonymous = SurrealDB::Client.new(client.connection.url)
+    anonymous.connect
+    anonymous.use(SurrealHelper::SURREAL_NS, SurrealHelper::SURREAL_DB)
+    expect { anonymous.import("OPTION IMPORT; CREATE #{table}:nope") }.to raise_error(SurrealDB::NotAllowedError)
+  ensure
+    anonymous&.close
+  end
+
+  it 'exports the database as SurrealQL' do
+    client.create(rid('exported'), { 'name' => 'Alice' })
+    sql = client.export
+    expect(sql).to include("DEFINE TABLE #{table}")
+    expect(sql).to include('Alice')
+    expect(sql.encoding).to eq(Encoding::UTF_8)
+  end
+
+  it 'exports with options' do
+    other = unique_table('other')
+    client.create(rid('a'), { 'name' => 'Alice' })
+    client.create(SurrealDB::RecordID.new(other, 'b'), { 'name' => 'Bob' })
+    sql = client.export(tables: [table], records: false)
+    expect(sql).to include("DEFINE TABLE #{table}")
+    expect(sql).not_to include(other)
+    expect(sql).not_to include('Alice')
+  end
+
+  it 'streams an export to a block' do
+    client.create(rid('streamed'), { 'name' => 'Streamy' })
+    chunks = []
+    expect(client.export { |chunk| chunks << chunk }).to be_nil
+    expect(chunks.join).to include('Streamy')
+  end
+
+  it 'passes on an error the export block raises, not as a connection error' do
+    expect { client.export { |_chunk| raise Errno::ENOSPC } }.to raise_error(Errno::ENOSPC)
+  end
+
+  it 'refuses import and export once the client is closed' do
+    client.close
+    expect { client.export }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+    expect { client.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::ConnectionError, /not connected/)
+  end
+
+  it 'refuses import and export from a closed session, rather than sending them signed out' do
+    session = client.new_session
+    session.close
+    expect { session.export }.to raise_error(SurrealDB::SessionError, /closed/)
+    expect { session.import("OPTION IMPORT;\nCREATE x;") }.to raise_error(SurrealDB::SessionError, /closed/)
+  end
+
+  it 'round-trips an export through an import' do
+    client.create(rid('rt'), { 'name' => 'Round', 'tags' => %w[a b] })
+    sql = client.export(tables: [table])
+    client.query("REMOVE TABLE #{table}")
+    client.import(sql)
+    expect(client.select(rid('rt'))).to include('name' => 'Round', 'tags' => %w[a b])
+  end
+end
+
+RSpec.shared_examples 'session variables' do
+  after { client.close }
+
+  def value_of(sql, vars = {})
+    client.query_raw(sql, vars).last.result
+  end
+
+  it 'keeps a variable set with set/let for later queries' do
+    client.set('greeting', 'hello')
+    client.let('count', 3)
+    expect(value_of('RETURN $greeting')).to eq('hello')
+    expect(value_of('RETURN [$greeting, $count]')).to eq(['hello', 3])
+  end
+
+  it 'lets query variables override session variables for that query only' do
+    client.set('who', 'session')
+    expect(value_of('RETURN $who', { 'who' => 'query' })).to eq('query')
+    expect(value_of('RETURN $who')).to eq('session')
+  end
+
+  it 'forgets a variable after unset' do
+    client.set('temp', 1)
+    client.unset('temp')
+    expect(value_of('RETURN $temp')).to eq(SurrealDB::NONE)
+  end
+
+  it 'refuses a name the server protects, as it does over every transport' do
+    expect { client.set('auth', 1) }.to raise_error(SurrealDB::ServerError)
+    expect(value_of('RETURN $auth')).not_to eq(1)
+  end
+
+  it 'keeps the value as it was set, whatever the caller does to its object later' do
+    tags = ['a']
+    client.set('tags', tags)
+    tags << 'b'
+    expect(value_of('RETURN $tags')).to eq(['a'])
+  end
+
+  it 'keeps what a typed value held when it was set, too' do
+    id = ['a']
+    client.set('rid', SurrealDB::RecordID.new('user', id))
+    id << 'b'
+    expect(value_of('RETURN $rid')).to eq(SurrealDB::RecordID.new('user', ['a']))
+  end
+end
+
+RSpec.shared_examples 'session lifecycle' do
+  after { client.close }
+
+  let(:ns) { SurrealHelper::SURREAL_NS }
+  let(:db) { SurrealHelper::SURREAL_DB }
+
+  def where_am_i
+    client.query('RETURN [session::ns(), session::db()]')[0]
+  end
+
+  it 'returns the namespace and database from use' do
+    expect(client.use(ns, 'lifecycle_a')).to eq({ 'namespace' => ns, 'database' => 'lifecycle_a' })
+    expect(where_am_i).to eq([ns, 'lifecycle_a'])
+  end
+
+  it 'changes only the namespace or only the database' do
+    client.use(ns, 'lifecycle_a')
+    expect(client.use(database: 'lifecycle_b')).to eq({ 'namespace' => ns, 'database' => 'lifecycle_b' })
+    expect(where_am_i).to eq([ns, 'lifecycle_b'])
+
+    expect(client.use("#{ns}_other")).to eq({ 'namespace' => "#{ns}_other", 'database' => 'lifecycle_b' })
+    expect(where_am_i).to eq(["#{ns}_other", 'lifecycle_b'])
+  end
+
+  it 'clears the database with nil' do
+    expect(client.use(database: nil)).to eq({ 'namespace' => ns, 'database' => nil })
+    expect(where_am_i).to eq([ns, SurrealDB::NONE])
+    client.use(database: db) # and a later use selects it again
+    expect(where_am_i).to eq([ns, db])
+  end
+
+  it 'resets the session: signed out, nothing selected, no variables' do
+    client.set('kept', 1)
+    client.reset
+
+    expect(where_am_i).to eq([SurrealDB::NONE, SurrealDB::NONE])
+    expect { client.query('INFO FOR ROOT') }.to raise_error(SurrealDB::NotAllowedError)
+
+    client.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    client.use(ns, db)
+    expect(client.query('RETURN [session::ns(), session::db(), $kept]')[0]).to eq([ns, db, SurrealDB::NONE])
+  end
+
+  it 'reports the server healthy' do
+    expect { client.health }.not_to raise_error
+    expect(client.healthy?).to be(true)
+  end
+end
+
+# Expects `url`. Record users sign up through an access whose tokens last
+# two seconds, so renewal can be seen happening.
+RSpec.shared_examples 'token refresh' do
+  let(:database) { unique_table('tokens') }
+  let(:ns) { SurrealHelper::SURREAL_NS }
+  let(:root) do
+    new_test_client(url).tap do |c|
+      c.use(ns, database)
+      c.query(<<~SQL)
+        DEFINE TABLE OVERWRITE user SCHEMALESS PERMISSIONS FOR select WHERE id = $auth.id;
+        DEFINE ACCESS OVERWRITE with_refresh ON DATABASE TYPE RECORD
+          SIGNUP (CREATE user SET name = $name, pass = crypto::argon2::generate($pass))
+          SIGNIN (SELECT * FROM user WHERE name = $name AND crypto::argon2::compare(pass, $pass))
+          WITH REFRESH
+          DURATION FOR TOKEN 2s, FOR SESSION 1h;
+        DEFINE ACCESS OVERWRITE plain ON DATABASE TYPE RECORD
+          SIGNUP (CREATE user SET name = $name, pass = crypto::argon2::generate($pass))
+          SIGNIN (SELECT * FROM user WHERE name = $name AND crypto::argon2::compare(pass, $pass))
+          DURATION FOR TOKEN 2s, FOR SESSION 1h;
+      SQL
+    end
+  end
+  let(:user) { SurrealDB::Client.new(url, **client_options).tap(&:connect) }
+  let(:client_options) { {} }
+
+  after do
+    user.close
+    root.close
+  end
+
+  def credentials(access, name = "u#{SecureRandom.hex(4)}")
+    { 'ns' => ns, 'db' => database, 'ac' => access, 'name' => name, 'pass' => 'secret' }
+  end
+
+  def who
+    user.query('RETURN $auth.name')[0]
+  end
+
+  def sleep_past_expiry
+    expires_at = user.connection.session_state.access_expires_at
+    sleep(expires_at - Time.now + 0.3)
+  end
+
+  it 'signs up with an access and a refresh token, and refreshes them' do
+    root
+    tokens = user.signup(credentials('with_refresh', 'alice'))
+    expect(tokens.keys).to contain_exactly('access', 'refresh')
+
+    renewed = user.refresh
+    expect(renewed.keys).to contain_exactly('access', 'refresh')
+    expect(renewed['refresh']).not_to eq(tokens['refresh'])
+    expect(who).to eq('alice')
+
+    # the refresh token is single use
+    expect { user.refresh(tokens) }.to raise_error(SurrealDB::NotAllowedError)
+  end
+
+  it 'revokes the refresh token' do
+    root
+    user.signup(credentials('with_refresh'))
+    tokens = user.connection.session_state.tokens
+    user.revoke
+    expect { user.refresh }.to raise_error(ArgumentError, /no refresh token/)
+    expect { user.refresh(tokens) }.to raise_error(SurrealDB::NotAllowedError)
+  end
+
+  it 'renews an expiring token with the refresh token' do
+    root
+    user.signup(credentials('with_refresh', 'bob'))
+    first = user.connection.session_state.access_token
+    sleep_past_expiry
+    expect(who).to eq('bob')
+    expect(user.connection.session_state.access_token).not_to eq(first)
+  end
+
+  it 'renews an expiring token by signing in again when there is no refresh token' do
+    root
+    SurrealDB::Client.new(url).tap(&:connect).then do |c|
+      c.signup(credentials('plain', 'carol'))
+      c.close
+    end
+    user.signin(credentials('plain', 'carol'))
+    sleep_past_expiry
+    expect(who).to eq('carol')
+  end
+
+  context 'with renew_tokens: false' do
+    let(:client_options) { { renew_tokens: false } }
+
+    it 'leaves an expired token alone' do
+      root
+      user.signup(credentials('with_refresh', 'dave'))
+      first = user.connection.session_state.access_token
+      sleep_past_expiry
+      begin
+        user.query('RETURN 1')
+      rescue SurrealDB::ServerError
+        nil # HTTP refuses the expired token outright
+      end
+      expect(user.connection.session_state.access_token).to eq(first)
+    end
+  end
+
+  it 'refuses refresh without a refresh token' do
+    expect { user.refresh }.to raise_error(ArgumentError, /no refresh token/)
+  end
+end
+
+RSpec.shared_examples 'call timeouts' do
+  after { client.close }
+
+  # Seconds the block took; it is expected to raise TimeoutError.
+  def seconds_to_time_out(&block)
+    start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    expect(&block).to raise_error(SurrealDB::TimeoutError)
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
+  end
+
+  it 'gives up on one call after its own timeout' do
+    expect(seconds_to_time_out { client.query('SLEEP 2s', timeout: 0.3) }).to be < 1.5
+    expect(client.query('RETURN 1')).to eq([1]) # the connection is still usable
+  end
+
+  it 'applies with_timeout to every call in the block, innermost first' do
+    client.with_timeout(5) do
+      expect(client.query('SLEEP 100ms; RETURN 2')[1]).to eq(2)
+      client.with_timeout(0.3) do
+        expect(seconds_to_time_out { client.query_raw('SLEEP 2s') }).to be < 1.5
+      end
+      expect(client.query('SLEEP 500ms; RETURN 3')[1]).to eq(3)
+    end
+  end
+
+  it 'applies with_timeout to sessions on the same connection' do
+    session = client.fork_session
+    client.with_timeout(0.3) do
+      expect(seconds_to_time_out { session.query('SLEEP 2s') }).to be < 1.5
+    end
+  ensure
+    session&.close
+  end
+
+  it 'lets a single call take longer than the connection timeout' do
+    quick = SurrealDB::Client.new(url, timeout: 0.3).connect
+    quick.signin({ 'user' => SurrealHelper::SURREAL_USER, 'pass' => SurrealHelper::SURREAL_PASS })
+    expect { quick.query('SLEEP 1s') }.to raise_error(SurrealDB::TimeoutError)
+    expect(quick.query('SLEEP 1s; RETURN 4', timeout: 5)[1]).to eq(4)
+  ensure
+    quick&.close
+  end
+end
+
+RSpec.shared_examples 'query streaming' do
+  let(:table) { unique_table('stream') }
+
+  after { client.close }
+
+  before do
+    client.query("DEFINE TABLE #{table} SCHEMALESS; FOR $i IN 1..=5 { CREATE type::record($t, $i) SET n = $i }",
+                 { 't' => table })
+  end
+
+  def rows_of(chunks, index)
+    chunks.select { |c| c.index == index && c.rows? }.flat_map(&:values)
+  end
+
+  it 'yields rows, values and a finished chunk per statement' do
+    chunks = []
+    client.query_stream("SELECT n FROM #{table} ORDER BY n; RETURN 7") { |chunk| chunks << chunk }
+
+    expect(rows_of(chunks, 0)).to eq((1..5).map { |n| { 'n' => n } })
+    expect(chunks.select { |c| c.index == 1 }.map(&:kind)).to eq(%i[value finished])
+    expect(chunks.find { |c| c.index == 1 && c.kind == :value }.value).to eq(7)
+    expect(chunks.select(&:finished?).map(&:index)).to eq([0, 1])
+    expect(chunks.select(&:finished?).map(&:time)).to all(be_a(String))
+  end
+
+  it 'gives a statement with an empty result a chunk for it, as buffered results do' do
+    chunks = client.query_stream("RETURN []; SELECT * FROM #{table} WHERE n > 99; RETURN 1").to_a
+    expect(chunks.reject(&:finished?).map { |c| [c.index, c.kind, c.values] })
+      .to eq([[0, :rows, []], [1, :rows, []], [2, :value, [1]]])
+  end
+
+  it 'yields the same results as query' do
+    sql = "SELECT * FROM #{table} WHERE n > $min ORDER BY n; RETURN 'x'"
+    chunks = client.query_stream(sql, { 'min' => 2 }).to_a # an Enumerator without a block
+    expect([rows_of(chunks, 0), chunks.find { |c| c.index == 1 && !c.finished? }.value])
+      .to eq(client.query(sql, { 'min' => 2 }))
+  end
+
+  it 'reports a failed statement on its chunk, then raises its error' do
+    chunks = []
+    expect { client.query_stream("RETURN 1; THROW 'boom'; RETURN 3") { |chunk| chunks << chunk } }
+      .to raise_error(SurrealDB::ThrownError, /boom/)
+    failed = chunks.find { |c| c.index == 1 && c.finished? }
+    expect(failed.error).to be_a(SurrealDB::ThrownError)
+    expect(chunks.select(&:finished?).map(&:index)).to eq([0, 1, 2]) # later statements still ran
+  end
+
+  it 'stops early when the block breaks, leaving the connection usable' do
+    client.query('FOR $i IN 6..=3000 { CREATE type::record($t, $i) SET n = $i }', { 't' => table })
+    seen = 0
+    client.query_stream("SELECT * FROM #{table}; RETURN 'never needed'") do |chunk|
+      seen += 1
+      break if chunk.rows?
+    end
+    expect(seen).to eq(1)
+    expect(client.query('RETURN 42')).to eq([42])
+  end
+
+  it 'streams in a session' do
+    session = client.fork_session
+    session.set('limit', 2)
+    chunks = session.query_stream("SELECT n FROM #{table} ORDER BY n LIMIT $limit").to_a
+    expect(rows_of(chunks, 0)).to eq([{ 'n' => 1 }, { 'n' => 2 }])
+  ensure
+    session&.close
+  end
+end
+
+RSpec.shared_examples 'gql and user-defined APIs' do
+  let(:database) { unique_table('api') }
+
+  after { client.close }
+
+  before do
+    client.use(SurrealHelper::SURREAL_NS, database)
+    client.query(<<~SQL)
+      DEFINE API OVERWRITE "/greet/:name" FOR get, post THEN {
+        RETURN {
+          status: 201,
+          headers: { "x-name": $request.params.name },
+          body: { hello: $request.params.name, method: $request.method, sent: $request.body,
+                  q: $request.query, tenant: $request.headers["x-tenant"] }
+        }
+      };
+      UPSERT person:ann SET name = 'Ann', age = 31;
+      UPSERT person:bob SET name = 'Bob', age = 25;
+    SQL
+  end
+
+  def server_older_than?(version)
+    SurrealDB::ServerVersion.parse(client.server_version) < Gem::Version.new(version)
+  end
+
+  it 'invokes an endpoint with its method, body, query, headers and prefix' do
+    api = client.api('/greet').header('x-tenant', 'acme')
+    response = api.post('/ann', { 'a' => 1 }, query: { 'k' => 'v' })
+
+    expect(response.status).to eq(201)
+    expect(response).to be_success
+    expect(response.headers).to include('x-name' => 'ann')
+    expect(response.value).to eq('hello' => 'ann', 'method' => 'post', 'sent' => { 'a' => 1 },
+                                 'q' => { 'k' => 'v' }, 'tenant' => 'acme')
+    expect(api.get('/bob').value).to include('hello' => 'bob', 'method' => 'get')
+  end
+
+  it 'reports an unsuccessful response, raising only when asked for the value' do
+    response = client.api.get('/nowhere')
+    expect(response.status).to eq(404)
+    expect(response).not_to be_success
+    expect { response.value }.to raise_error(SurrealDB::ApiError, %r{GET /nowhere answered 404})
+  end
+
+  it 'runs GQL queries with variables, or says the server cannot' do
+    query = 'MATCH (p:person) WHERE p.age > $min RETURN p.name AS name'
+    if server_older_than?('3.2.0')
+      expect { client.gql(query) }.to raise_error(SurrealDB::UnsupportedError, /GQL/)
+    elsif server_older_than?('3.3.0') && !gql_enabled_on_3_2?
+      expect { client.gql(query) }.to raise_error(SurrealDB::NotAllowedError, /Experimental capability `gql`/)
+    else
+      expect(client.gql(query, { 'min' => 30 })).to eq([[{ 'name' => 'Ann' }]])
+      expect { client.gql('MATCH (p:person RETURN') }.to raise_error(SurrealDB::ValidationError)
+    end
+  end
+
+  it 'gives GQL the variables set on the connection' do
+    skip 'needs GQL' if server_older_than?('3.2.0') || (server_older_than?('3.3.0') && !gql_enabled_on_3_2?)
+
+    client.set('min', 30)
+    expect(client.gql('MATCH (p:person) WHERE p.age > $min RETURN p.name AS name')).to eq([[{ 'name' => 'Ann' }]])
+  end
+
+  # GQL on 3.2 is behind the experimental `gql` capability.
+  def gql_enabled_on_3_2?
+    client.gql('MATCH (p:person) RETURN p.name AS name')
+    true
+  rescue SurrealDB::NotAllowedError
+    false
   end
 end

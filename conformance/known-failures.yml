@@ -1,0 +1,20 @@
+# Scenarios of the surrealdb-protocol conformance suite this SDK is known to
+# fail, with why. conformance/check-report fails the run on any other failure,
+# and on a scenario listed here that passes, so the list stays current.
+#
+#   <scenario>:
+#     transports: [ws, http]   # where it fails (default: both)
+#     reason: why
+
+query-values-survive-the-full-stack:
+  reason: >
+    The encoder sends a polygon's rings as bare coordinates, which the server
+    refuses (a parse error over HTTP, no answer over WebSocket), and the
+    decoder does not yet read `[]`, the server's zero duration (fixed in a
+    separate change).
+
+query-sized-numbers-widen-over-plain-cbor:
+  reason: >
+    The scenario expects the widened numbers of plain cbor, but with SurrealDB
+    4.0 this SDK negotiates cbor.2, which keeps their width ({$u8: 5}, not 5).
+    It runs only against 4.0.

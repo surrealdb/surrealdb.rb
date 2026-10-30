@@ -25,6 +25,27 @@ RSpec.describe SurrealDB::Protocol::RPC do
       expect(decoded['params']).to eq(%w[test test])
     end
 
+    it 'omits the session field for the default session' do
+      _, bytes = rpc.encode_request('ping')
+      expect(CBOR.decode(bytes).keys).to contain_exactly('id', 'method', 'params')
+    end
+
+    it 'carries the session id as a uuid in the envelope' do
+      session = SurrealDB::Uuid.v4
+      _, bytes = rpc.encode_request('query', ['RETURN 1'], session: session)
+      field = CBOR.decode(bytes)['session']
+      expect(field.tag).to eq(SurrealDB::CBOR::Tags::UUID_BINARY)
+      expect(field.value).to eq(session.bytes)
+    end
+
+    it 'carries the transaction id as a uuid in the envelope' do
+      txn = SurrealDB::Uuid.v4
+      _, bytes = rpc.encode_request('query', ['RETURN 1'], txn: txn)
+      decoded = CBOR.decode(bytes)
+      expect(decoded['txn'].value).to eq(txn.bytes)
+      expect(decoded).not_to have_key('session')
+    end
+
     it 'prepares SurrealDB types in params' do
       _, bytes = rpc.encode_request('select', [SurrealDB::Table.new('users')])
       decoded = CBOR.decode(bytes)

@@ -7,7 +7,8 @@ SurrealDB.connect('ws://localhost:8000') do |db|
   db.signin('user' => 'root', 'pass' => 'root')
   db.use('test', 'test')
 
-  # Start live query
+  # Start live query (the table must exist)
+  db.query('DEFINE TABLE IF NOT EXISTS events SCHEMALESS')
   live_id = db.live('events')
   puts "Live query started: #{live_id}"
 
