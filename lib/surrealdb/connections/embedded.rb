@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative '../native/options'
+
 module SurrealDB
   module Connections
     # Embedded transport for SurrealDB via FFI to libsurrealdb_c.

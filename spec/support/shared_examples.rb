@@ -155,7 +155,7 @@ RSpec.shared_examples 'query operations' do
   end
 
   it 'returns durations the server sends in short compact form' do
-    result = client.query('RETURN [0s, 5s, 1500ms]').first['result']
+    result = client.query('RETURN [0s, 5s, 1500ms]').first
     expect(result).to eq([
                            SurrealDB::Duration.new(0, 0),
                            SurrealDB::Duration.new(5, 0),

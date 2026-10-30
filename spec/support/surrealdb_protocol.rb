@@ -16,8 +16,6 @@ module SurrealDBProtocol
   # pending, so one that starts to pass fails the run until it comes off the
   # list. None of them is about the sized numbers.
   KNOWN_VECTOR_GAPS = {
-    'the decoder reads only the long form of a duration ([] and [secs] are fixed on main), and secs past i64' =>
-      %w[duration-zero duration-whole-seconds duration-u64-seconds],
     'the decoder expects lines and polygons as raw coordinates, not the tagged points the server sends' =>
       %w[geometry-linestring geometry-polygon geometry-polygon-with-hole geometry-multipoint
          geometry-multilinestring geometry-polygon-unclosed-ring geometry-multipolygon geometry-collection],
@@ -37,8 +35,7 @@ module SurrealDBProtocol
       %w[reject-none-with-payload reject-datetime-after-chrono-max reject-datetime-before-chrono-min
          reject-datetime-impossible-date reject-datetime-negative-nanoseconds reject-datetime-seconds-beyond-i64
          reject-decimal-beyond-96-bits reject-decimal-mantissa-beyond-96-bits reject-decimal-scale-beyond-28
-         reject-decimal-surrounding-whitespace reject-decimal-trailing-whitespace
-         reject-duration-negative-nanoseconds reject-duration-three-elements reject-file-non-string-key
+         reject-decimal-surrounding-whitespace reject-decimal-trailing-whitespace reject-file-non-string-key
          reject-file-one-element reject-indefinite-text-split-code-point reject-object-integer-key
          reject-point-one-coordinate reject-range-one-bound reject-range-untagged-bound
          reject-record-id-bool-key reject-record-id-decimal-key reject-record-id-float-key

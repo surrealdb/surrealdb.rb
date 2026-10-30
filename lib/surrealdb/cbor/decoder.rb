@@ -53,8 +53,7 @@ module SurrealDB
         when Tags::DECIMAL_STRING       then BigDecimal(value)
         when Tags::DATETIME_COMPACT     then Time.at(value[0], value[1], :nanosecond).utc
         when Tags::DURATION_STRING      then SurrealDB::Duration.parse(value)
-        # The server omits trailing zero fields: [] is 0s and [secs] has no nanos.
-        when Tags::DURATION_COMPACT     then SurrealDB::Duration.new(value[0] || 0, value[1] || 0)
+        when Tags::DURATION_COMPACT     then decode_duration(value)
         when Tags::RANGE                then decode_range(value, cbor2)
         when Tags::BOUND_INCLUDED       then SurrealDB::BoundIncluded.new(resolve(value, cbor2: cbor2))
         when Tags::BOUND_EXCLUDED       then SurrealDB::BoundExcluded.new(resolve(value, cbor2: cbor2))
@@ -69,6 +68,20 @@ module SurrealDB
         else
           value
         end
+      end
+
+      # [secs, nanos], both unsigned. The server omits trailing zero fields:
+      # [] is 0s and [secs] has no nanos.
+      def decode_duration(value)
+        unless value.is_a?(Array) && value.size <= 2 && value.all? { |v| unsigned_integer?(v) }
+          raise ProtocolError, "a duration is [secs, nanos] of unsigned integers, got #{value.inspect}"
+        end
+
+        SurrealDB::Duration.new(value[0] || 0, value[1] || 0)
+      end
+
+      def unsigned_integer?(value)
+        value.is_a?(Integer) && !value.negative?
       end
 
       # The integer tags hold a CBOR integer in the kind's range, and the

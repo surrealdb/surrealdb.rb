@@ -91,6 +91,13 @@ RSpec.describe SurrealDB::CBOR::Decoder do
       expect(described_class.decode(encoded)).to eq(SurrealDB::Duration.new(5, 0))
     end
 
+    [[-1], [0, -1], [1, 2, 3], [1.5]].each do |fields|
+      it "refuses a compact Duration of #{fields.inspect}" do
+        encoded = CBOR::Tagged.new(SurrealDB::CBOR::Tags::DURATION_COMPACT, fields).to_cbor
+        expect { described_class.decode(encoded) }.to raise_error(SurrealDB::ProtocolError, /unsigned integers/)
+      end
+    end
+
     it 'handles Time (datetime)' do
       t = Time.utc(2024, 6, 15, 12, 30, 45)
       result = round_trip(t)
